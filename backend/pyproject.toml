@@ -1,0 +1,45 @@
+[project]
+name = "story-graphrag-backend"
+version = "0.1.0"
+description = "Local-first FastAPI backend for Story GraphRAG"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.116.1",
+    "httpx>=0.28.1",
+    "langchain>=1.0.0",
+    "langchain-community>=0.3.29",
+    "langchain-experimental>=0.3.4",
+    "langchain-openai>=1.0.1",
+    "langchain-text-splitters>=0.3.10",
+    "langgraph>=1.0.0",
+    "motor>=3.7.1",
+    "neo4j>=5.28.2",
+    "openai>=1.108.1",
+    "orjson>=3.11.3",
+    "pydantic>=2.11.9",
+    "pydantic-settings>=2.10.1",
+    "pypdf>=6.1.0",
+    "python-multipart>=0.0.20",
+    "qdrant-client>=1.15.1",
+    "redis>=6.4.0",
+    "tiktoken>=0.11.0",
+    "uvicorn>=0.35.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.2.0",
+    "pytest-mock>=3.15.1",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "integration: requires local infrastructure services",
+]
+
+[tool.uv]
+default-groups = ["dev"]
