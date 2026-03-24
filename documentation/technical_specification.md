@@ -14,12 +14,15 @@
 ┌──────────────────────────────────────────────────────────────┐
 │                        User Browser                           │
 │           React Frontend (Vite + TailwindCSS)                 │
-│     [Upload] [Graph Viz] [Q&A Interface] [History Sidebar]    │
+│    [Upload] [Graph Viz] [Chat Interface] [History Sidebar]    │
 └────────────────────────┬─────────────────────────────────────┘
                          │ HTTP / SSE
 ┌────────────────────────▼─────────────────────────────────────┐
 │                    FastAPI Backend                             │
 │         (Async REST API + SSE Streaming Endpoints)            │
+│  main.py bootstraps app, builds service container, and runs   │
+│ create_index.py on startup for story/chat MongoDB indexes and │
+│                        Neo4j indexes                          │
 └──────┬──────────────────────┬────────────────────────────────┘
        │                      │
 ┌──────▼──────┐      ┌────────▼────────┐
@@ -28,12 +31,13 @@
 │ (LangGraph) │      │                 │
 └──────┬──────┘      └────────┬────────┘
        │                      │
-  ┌────▼──────────────────────▼────┐
-  │        Local Data Layer         │
-  │ Neo4j │ Qdrant │ MongoDB │     │
-  └─────────────────────────────────┘
-       │                      │
-  OpenAI API           Redis (local job bus)
+       │                Gemini API
+       │         (gemini-3.1-flash-lite-preview)
+       │
+  ┌────▼──────────────────────▼──────────────────────┐
+  │                  Local Data Layer                 │
+  │ Neo4j │ Qdrant │ MongoDB │ Redis │ BGE Embeddings │
+  └───────────────────────────────────────────────────┘
 ```
 
 ---
@@ -43,25 +47,26 @@
 | Layer | Technology | Reason |
 |---|---|---|
 | Agent Framework | LangGraph | Stateful graph execution for both ingestion pipeline and query routing agent |
-| LLM | OpenAI GPT-4o-mini | Graph extraction, deduplication, answer generation |
+| Query Memory | LangGraph `MongoDBSaver` | Persists query-agent state by `thread_id`, where `thread_id == chat_id` |
+| LLM | Gemini `gemini-3.1-flash-lite-preview` | Graph extraction, deduplication, routing, Cypher generation, and answer generation |
 | Graph Extraction | LangChain `LLMGraphTransformer` | Extracts nodes + relationships together in one async batched call using function calling |
 | Text Splitting | LangChain `RecursiveCharacterTextSplitter` | Pure text chunking — no LLM, 600 tokens, 100 overlap |
 | Structured Output | LangChain `.with_structured_output()` | Type-safe responses for deduplication, routing, Cypher generation, and answer synthesis |
 | Graph Database | Local Neo4j | Self-hosted graph storage and Cypher traversal on the developer machine |
-| Vector Database | Local Qdrant | Self-hosted semantic similarity search for chunk retrieval, typically via Docker Compose |
-| History Store | Local MongoDB (Motor async driver) | Self-hosted persistence for stories, file-name based selection, and Q&A history |
-| Embeddings | OpenAI text-embedding-3-small | Chunk embeddings stored in Qdrant only |
+| Vector Database | Local Qdrant | Self-hosted semantic similarity search for chunk retrieval, currently run from `backend/qdrant/docker-compose.yml` |
+| History Store | Local MongoDB (Motor async driver) | Self-hosted persistence for stories, file-name based selection, chat metadata, and LangGraph checkpoint collections |
+| Embeddings | `BAAI/bge-small-en-v1.5` via `HuggingFaceBgeEmbeddings` | Local chunk and query embeddings stored in Qdrant only |
 | Backend | FastAPI (fully async) | Async endpoints, SSE streaming, BackgroundTasks for ingestion |
-| Job State | Local Redis | Self-hosted ingestion lock + progress stream bridge for SSE |
-| Graph Visualization | react-force-graph | Interactive force-directed graph rendering in the browser |
+| Job State | Local Redis | Self-hosted ingestion lock + progress stream bridge for SSE, currently expected as a local host service |
+| Graph Visualization | `@react-sigma/core` + Graphology + `@react-sigma/layout-forceatlas2` | React-friendly WebGL graph rendering with a dedicated graph data layer and ForceAtlas2 layout for knowledge-graph exploration |
 | Frontend | React + Vite + TailwindCSS | Component-based UI |
-| Containerization | Docker + Docker Compose | Single-command local setup for backend, frontend, Neo4j, Qdrant, Redis, and MongoDB |
+| Local Infra | Dedicated Docker Compose files for Neo4j and Qdrant | `backend/neo4j/docker-compose.yml` and `backend/qdrant/docker-compose.yml`; MongoDB and Redis run as local host services |
 
 ---
 
 ## 3. Ingestion Pipeline (LangGraph)
 
-The ingestion pipeline is a LangGraph graph that runs as a FastAPI `BackgroundTask` after a story is uploaded. It processes the document end-to-end, writes the normalized knowledge graph to local Neo4j, writes chunk embeddings to local Qdrant, stores story metadata and Q&A history in local MongoDB, and uses local Redis for ingestion status + SSE progress streaming.
+The ingestion pipeline is a LangGraph graph that runs as a FastAPI `BackgroundTask` after a story is uploaded. It processes the document end-to-end, writes the normalized knowledge graph to local Neo4j, writes chunk embeddings to local Qdrant, stores story metadata in local MongoDB, and uses local Redis for ingestion status + SSE progress streaming.
 
 ### 3.1 Ingestion State Schema
 
@@ -124,9 +129,12 @@ def document_loader_node(state: IngestionState) -> dict:
 
 ```python
 from langchain_experimental.graph_transformers import LLMGraphTransformer
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 
-llm = ChatOpenAI(temperature=0, model="gpt-4o-mini")
+llm = ChatGoogleGenerativeAI(
+    model="gemini-3.1-flash-lite-preview",
+    temperature=0,
+)
 
 transformer = LLMGraphTransformer(
     llm=llm,
@@ -150,40 +158,23 @@ async def graph_extractor_node(state: IngestionState) -> dict:
 ```
 
 #### Gleaning Node
-- Runs a second LLM pass over each chunk asking "what entities or relationships were missed?"
-- Merges any newly found nodes and relationships back into `graph_docs`
-- Uses the same `LLMGraphTransformer` — one additional call per chunk, diminishing returns after one pass
+- Runs a second LLM pass per chunk
+- Builds a contextual prompt that includes the nodes and relationships already extracted from that exact chunk
+- Asks for only genuinely new entities and relationships that are explicitly present in the text
+- Merges the second-pass result with code-level node and relationship deduplication instead of trusting the prompt alone
 
 ```python
 async def gleaning_node(state: IngestionState) -> dict:
-    gleaning_prompt = (
-        "Review the story excerpt again carefully. "
-        "Identify any characters, places, events, or relationships that were missed in the first pass. "
-        "Only return NEW entities and relationships not already found."
-    )
-
-    transformer_glean = LLMGraphTransformer(
-        llm=llm,
-        allowed_nodes=["CHARACTER", "PLACE", "EVENT", "OBJECT", "THEME"],
-        allowed_relationships=[
-            "FRIENDS_WITH", "ENEMY_OF", "LOVES", "BETRAYED",
-            "KILLED", "PRESENT_AT", "CAUSED", "LOCATED_IN", "LOYAL_TO"
-        ],
-        node_properties=["description"],
-        relationship_properties=["description"],
-        additional_instructions=gleaning_prompt
-    )
-
-    gleaned_docs = await transformer_glean.aconvert_to_graph_documents(state["chunks"])
-
-    # Merge gleaned nodes and relationships into existing graph_docs
-    merged = list(state["graph_docs"])
-    for orig, glean in zip(merged, gleaned_docs):
-        existing_node_ids = {n.id for n in orig.nodes}
-        for node in glean.nodes:
-            if node.id not in existing_node_ids:
-                orig.nodes.append(node)
-        orig.relationships.extend(glean.relationships)
+    merged = []
+    for chunk, original_doc in zip(state["chunks"], state["graph_docs"], strict=False):
+        existing_graph_context = format_existing_graph_context(original_doc)
+        transformer_glean = build_contextual_gleaning_transformer(
+            settings,
+            llm,
+            existing_graph_context,
+        )
+        gleaned_doc = await transformer_glean.aprocess_response(chunk)
+        merged.append(merge_graph_documents(original_doc, gleaned_doc))
 
     return {
         "graph_docs": merged,
@@ -196,7 +187,7 @@ async def gleaning_node(state: IngestionState) -> dict:
 - Makes a **single LLM call** using LangChain Structured Output to group aliases
 - Builds an `alias_map` — e.g. `{"Sherlock": "Holmes", "Mr. Holmes": "Holmes", "the detective": "Holmes"}`
 - Applies the map to every node `id` and relationship `source`/`target` in `graph_docs` before writing to Neo4j
-- Neo4j `MERGE` then collapses canonical entities cleanly for each `story_id`
+- Runs a second code-level graph deduplication pass after alias rewrite so canonicalization cannot create duplicate edges
 
 ```python
 from pydantic import BaseModel, Field
@@ -239,8 +230,10 @@ async def deduplication_node(state: IngestionState) -> dict:
             rel.source.id = alias_map.get(rel.source.id, rel.source.id)
             rel.target.id = alias_map.get(rel.target.id, rel.target.id)
 
+    deduplicated_docs = [deduplicate_graph_document(doc) for doc in state["graph_docs"]]
+
     return {
-        "graph_docs": state["graph_docs"],
+        "graph_docs": deduplicated_docs,
         "alias_map": alias_map,
         "progress": state["progress"] + [f"✓ Deduplicated {len(alias_map)} aliases"]
     }
@@ -283,27 +276,34 @@ async def graph_builder_node(state: IngestionState) -> dict:
 ```
 
 #### Vector Embedder Node
-- Embeds the raw text chunks in a single batched OpenAI API call
+- Embeds the raw text chunks with local `BAAI/bge-small-en-v1.5`
 - Upserts chunks and vectors into a local Qdrant collection named `story_{story_id}`
 - Stores chunk metadata alongside vectors for cited retrieval
-- **This is the only place embeddings are created** in the ingestion pipeline
+- Infers the collection vector size from the active embedding model before collection creation
+- **This is the only place document embeddings are created** in the ingestion pipeline
 
 ```python
+from langchain_community.embeddings import HuggingFaceBgeEmbeddings
+
 async def vector_embedder_node(state: IngestionState) -> dict:
     texts = [c.page_content for c in state["chunks"]]
-    embeddings = openai_client.embeddings.create(
-        input=texts, model="text-embedding-3-small"
-    ).data
+    embeddings_model = HuggingFaceBgeEmbeddings(
+        model_name="BAAI/bge-small-en-v1.5",
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={"normalize_embeddings": True},
+    )
+    embeddings = await embeddings_model.aembed_documents(texts)
+    vector_size = len(await embeddings_model.aembed_query("vector size probe"))
 
     qdrant.create_collection(
         collection_name=f"story_{state['story_id']}",
-        vectors_config=VectorParams(size=1536, distance=Distance.COSINE)
+        vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
     )
 
     points = [
         PointStruct(
             id=i,
-            vector=embeddings[i].embedding,
+            vector=embeddings[i],
             payload={
                 "chunk_id": state["chunks"][i].metadata["chunk_id"],
                 "chunk_index": state["chunks"][i].metadata["chunk_index"],
@@ -353,18 +353,24 @@ ingestion_graph = builder.compile()
 
 The query agent is a separate LangGraph graph that handles user questions after a story has been ingested. Its primary job is to **route each question to the right retrieval method**, execute graph retrieval against local Neo4j and/or vector retrieval against local Qdrant, and synthesize a cited answer.
 
+Conversation memory is enabled only for the query graph. Each `story_id` can have many chats, each chat has a `chat_id`, and `chat_id` is used as the LangGraph `thread_id`. The query graph is compiled with `MongoDBSaver`, so follow-up questions in the same chat can reuse prior messages and transcript state even after an app restart.
+
 ### 4.1 Query State Schema
 
 ```python
 class QueryState(TypedDict):
     story_id: str
     question: str
-    query_type: str           # "vector" | "graph" | "hybrid"
+    messages: list[BaseMessage]            # LangGraph message history for memory
+    transcript: list[dict]                # structured chat transcript for frontend
+    query_type: str                       # "vector" | "graph" | "hybrid"
+    routing_reason: Optional[str]
     cypher_query: Optional[str]
     graph_results: Optional[list[dict]]
     vector_results: Optional[list[dict]]
+    evidence: Optional[dict]
     answer: str
-    citations: list[dict]     # cited chunks and/or graph nodes/edges
+    citations: list[dict]                 # cited chunks and/or graph nodes/edges
 ```
 
 ### 4.2 Query Nodes
@@ -372,6 +378,7 @@ class QueryState(TypedDict):
 #### Router Node
 - The first node — classifies the question into `vector`, `graph`, or `hybrid`
 - Uses **LangChain Structured Output** to return a typed routing decision
+- Receives recent chat history so it can route follow-up questions using prior conversational context
 
 ```python
 class RouterOutput(BaseModel):
@@ -381,23 +388,22 @@ class RouterOutput(BaseModel):
 router = llm.with_structured_output(RouterOutput)
 
 def router_node(state: QueryState) -> dict:
-    prompt = f"""
-    Classify this question about a story into one of three retrieval types:
-
-    - "vector": factual, descriptive, or thematic questions answerable from text passages
-    - "graph": questions about relationships, connections, or multi-hop reasoning between characters/events
-    - "hybrid": questions that require both text passages AND relationship traversal
-
-    Question: {state['question']}
-    """
+    prompt = build_router_prompt(
+        messages=state["messages"],
+        history_limit=12,
+    )
     result: RouterOutput = router.invoke(prompt)
-    return {"query_type": result.query_type}
+    return {
+        "query_type": result.query_type,
+        "routing_reason": result.reasoning
+    }
 ```
 
 #### Cypher Generator Node (Graph path only)
 - Translates the natural language question into a Neo4j Cypher query
 - Uses **LangChain Structured Output** to produce a valid, typed Cypher string
 - Scopes all queries to `story_id` to prevent cross-story contamination
+- Receives recent message history so follow-up prompts like "What about him?" can still resolve the intended entity
 
 ```python
 class CypherOutput(BaseModel):
@@ -406,16 +412,12 @@ class CypherOutput(BaseModel):
 cypher_generator = llm.with_structured_output(CypherOutput)
 
 def cypher_generator_node(state: QueryState) -> dict:
-    prompt = f"""
-    Generate a Neo4j Cypher query to answer the following question.
-    All nodes have a story_id property — always filter by: story_id = '{state['story_id']}'
-
-    Available node types: Entity (with .type = CHARACTER | PLACE | EVENT | OBJECT | THEME)
-    Available relationship types: FRIENDS_WITH, ENEMY_OF, LOVES, BETRAYED, KILLED,
-    PRESENT_AT, CAUSED, LOCATED_IN, OWNS, MEMBER_OF, LOYAL_TO
-
-    Question: {state['question']}
-    """
+    prompt = build_cypher_prompt(
+        story_id=state["story_id"],
+        messages=state["messages"],
+        allowed_relationships=ALLOWED_RELATIONSHIP_TYPES,
+        history_limit=12,
+    )
     result: CypherOutput = cypher_generator.invoke(prompt)
     return {"cypher_query": result.cypher}
 ```
@@ -426,7 +428,8 @@ def cypher_generator_node(state: QueryState) -> dict:
 - These become citations in the final answer
 
 #### Vector Retriever Node
-- Embeds the question and searches the local Qdrant collection for the selected story
+- Builds a contextualized search query from the current question plus recent transcript history
+- Embeds that contextualized search query with the same local `BAAI/bge-small-en-v1.5` model used during ingestion and searches the local Qdrant collection for the selected story
 - Returns the top 4 most relevant chunks with metadata
 - These become text-based citations in the final answer
 
@@ -434,6 +437,9 @@ def cypher_generator_node(state: QueryState) -> dict:
 - Receives whichever results were retrieved (graph, vector, or both)
 - Uses **LangChain Structured Output** to produce a typed answer with explicit citations
 - Citations reference either `chunk_id` (for vector results) or `node_name + relationship` (for graph results)
+- Receives recent message history so follow-up questions can be answered in context
+- Appends an assistant message to LangGraph `messages` and a structured assistant transcript item to `transcript`
+- The API layer persists chat metadata in MongoDB, while the full query-agent state is checkpointed automatically by LangGraph
 
 ```python
 class Citation(BaseModel):
@@ -489,30 +495,43 @@ builder.add_conditional_edges(
 builder.add_edge("vector_retriever", "answer_synthesizer")
 builder.add_edge("answer_synthesizer", END)
 
-query_graph = builder.compile()
+query_graph = builder.compile(checkpointer=mongo_checkpointer)
+```
+
+Runtime compile and invocation pattern:
+
+```python
+mongo_checkpointer = MongoDBSaver(...)
+query_graph = builder.compile(checkpointer=mongo_checkpointer)
+
+result = await query_graph.ainvoke(
+    initial_state,
+    config={"configurable": {"thread_id": chat_id}},
+)
 ```
 
 ---
 
 ## 5. LangChain Structured Output — Usage Policy
 
-All LLM calls in this system **must** use LangChain's `.with_structured_output()`. No raw string parsing or JSON extraction anywhere.
+All typed LLM control outputs in this system **must** use LangChain's `.with_structured_output()`. No raw string parsing or ad-hoc JSON extraction is allowed for routing, deduplication, Cypher generation, or answer synthesis.
 
 Nodes using structured output:
 
 | Node | Pydantic Model | Purpose |
 |---|---|---|
-| Gleaning | `LLMGraphTransformer` (built-in) | Second-pass extraction of missed entities/relationships |
 | Deduplication | `DeduplicationOutput` | Groups aliases into canonical names |
 | Router | `RouterOutput` | Typed query classification |
 | Cypher Generator | `CypherOutput` | Valid Cypher string scoped to `story_id` |
 | Answer Synthesizer | `AnswerOutput` | Typed answer + citations |
 
+`LLMGraphTransformer` is still used for graph extraction and contextual gleaning, but that path is handled through the transformer's own schema machinery rather than the project's explicit `.with_structured_output()` wrappers.
+
 ---
 
 ## 6. Backend API (FastAPI)
 
-All endpoints are `async`. Ingestion runs as a `BackgroundTask`. The system accepts exactly one `.pdf` or `.txt` per ingestion request, and only one ingestion job may be active at any given time. Multiple previously ingested stories may remain stored for later selection at inference time. Neo4j, Qdrant, MongoDB, and Redis are all expected to run locally, with Docker Compose as the default setup.
+All endpoints are `async`. Ingestion runs as a `BackgroundTask`. The system accepts exactly one `.pdf` or `.txt` per ingestion request, and only one ingestion job may be active at any given time. Multiple previously ingested stories may remain stored for later selection at inference time. Neo4j and Qdrant are typically started from their dedicated Docker Compose files under `backend/`, while MongoDB and Redis are expected as local host services.
 
 ### 6.1 Endpoints
 
@@ -521,10 +540,13 @@ All endpoints are `async`. Ingestion runs as a `BackgroundTask`. The system acce
 | `POST` | `/api/stories` | Upload one story file (`.pdf` or `.txt`) — rejects the request if another ingestion job is already running; fires ingestion pipeline as BackgroundTask and returns `story_id` instantly |
 | `GET` | `/api/stories/{story_id}/stream` | SSE stream of ingestion progress |
 | `GET` | `/api/stories/{story_id}` | Get story status + metadata |
-| `GET` | `/api/stories/{story_id}/graph` | Return all nodes and edges for the story (used by graph visualization) |
-| `POST` | `/api/stories/{story_id}/query` | Ask a question about the selected story, returns answer + citations |
 | `GET` | `/api/stories` | List all ingested stories for the selector/history sidebar, keyed by stored file name |
-| `GET` | `/api/stories/{story_id}/qa` | Get all past Q&A for a story |
+| `GET` | `/api/stories/{story_id}/graph` | Return all nodes and edges for the story (used by graph visualization) |
+| `GET` | `/api/stories/{story_id}/chunks` | Return all stored chunks for the story in chunk order |
+| `GET` | `/api/stories/{story_id}/chats` | List all chats for the selected story |
+| `GET` | `/api/stories/{story_id}/chats/{chat_id}` | Get one chat summary for the selected story |
+| `GET` | `/api/stories/{story_id}/chats/{chat_id}/messages` | Return the structured transcript for one chat |
+| `POST` | `/api/stories/{story_id}/chats/messages` | Send a user message; if `chat_id` is omitted, create a new chat and use it as the LangGraph `thread_id` |
 | `GET` | `/api/health` | Health check |
 
 ### 6.2 Key Endpoint Implementations
@@ -565,29 +587,62 @@ async def upload_story(
     return StoryResponse(story_id=story_id, status="queued")
 
 
-@app.post("/api/stories/{story_id}/query")
-async def query_story(story_id: str, request: QueryRequest):
-    result = await query_graph.ainvoke({
+@app.post("/api/stories/{story_id}/chats/messages")
+async def send_story_chat_message(story_id: str, request: ChatMessageRequest):
+    chat_id = request.chat_id or str(uuid4())
+    created_new_chat = request.chat_id is None
+
+    if not created_new_chat:
+        await chat_service.get_chat(story_id, chat_id)
+
+    result = await query_graph.ainvoke(
+        {
+            "story_id": story_id,
+            "question": request.message,
+            "messages": [HumanMessage(content=request.message)],
+            "transcript": [build_user_transcript(request.message)],
+            "query_type": "",
+            "routing_reason": None,
+            "cypher_query": None,
+            "graph_results": None,
+            "vector_results": None,
+            "evidence": None,
+            "answer": "",
+            "citations": [],
+        },
+        config={"configurable": {"thread_id": chat_id}},
+    )
+
+    if created_new_chat:
+        await chat_service.create_chat(story_id, chat_id, request.message)
+
+    await chat_service.update_chat_after_turn(
+        story_id,
+        chat_id,
+        user_message=request.message,
+        answer=result["answer"],
+        turn_count=count_assistant_turns(result.get("transcript")),
+    )
+
+    return {
+        "chat_id": chat_id,
         "story_id": story_id,
-        "question": request.question,
-        "query_type": "",
-        "graph_results": None,
-        "vector_results": None,
-        "answer": "",
-        "citations": []
-    })
-
-    # Persist Q&A to MongoDB
-    await save_qa(story_id, request.question, result["answer"], result["citations"])
-
-    return {"answer": result["answer"], "citations": result["citations"]}
+        "created_new_chat": created_new_chat,
+        "answer": result["answer"],
+        "query_type": result["query_type"],
+        "routing_reason": result.get("routing_reason"),
+        "citations": result["citations"],
+        "evidence": result.get("evidence"),
+    }
 ```
 
 Inference-time document selection flow:
 - Frontend calls `GET /api/stories`
 - User selects a stored PDF/TXT by its `title` / `filename`
 - Frontend resolves that selection to the corresponding `story_id`
-- All graph and query requests are then sent for that chosen `story_id`
+- Frontend calls `GET /api/stories/{story_id}/chats` to list prior chats for that story
+- User either opens an existing `chat_id` or sends the first message without a `chat_id`
+- All graph, chunks, and chat-message requests are then sent for that chosen `story_id`
 
 ### 6.3 Ingestion SSE — Redis-backed progress events
 
@@ -615,7 +670,7 @@ async def run_ingestion(story_id: str, title: str, file_path: str):
 
 ---
 
-## 7. MongoDB — History Store
+## 7. MongoDB — Story, Chat, and Checkpoint Store
 
 ### 7.1 Collections
 
@@ -631,41 +686,73 @@ async def run_ingestion(story_id: str, title: str, file_path: str):
     "entity_count": 47,
     "relationship_count": 89,
     "chunk_count": 120,
-    "created_at": "2026-03-18T10:00:00Z",
-    "qa": [
-        {
-            "question": "Who are Holmes's enemies?",
-            "answer": "Holmes's primary enemies include...",
-            "citations": [...],
-            "query_type": "graph",
-            "asked_at": "2026-03-18T10:05:00Z"
-        }
-    ]
+    "created_at": "2026-03-18T10:00:00Z"
 }
+```
+
+**`chats` collection** — one document per story-scoped chat:
+
+```python
+{
+    "_id": "chat_id",
+    "chat_id": "chat_id",
+    "thread_id": "chat_id",
+    "story_id": "story_id",
+    "title": "Who are Holmes's enemies?",
+    "created_at": "2026-03-18T10:05:00Z",
+    "updated_at": "2026-03-18T10:07:00Z",
+    "turn_count": 2,
+    "last_user_message": "What about his allies?",
+    "last_answer_preview": "Holmes's closest ally is Watson..."
+}
+```
+
+**LangGraph checkpoint collections** — persisted query-agent state:
+
+```python
+langgraph_checkpoints
+langgraph_checkpoint_writes
 ```
 
 Storage and selection rules:
 - `filename` / `display_name` is the user-facing selector value for each stored PDF/TXT
 - file names must be unique across stored stories; if a duplicate name is uploaded, the backend should reject it or require the user to rename the file first
 - `story_id` remains the internal primary key used by the API and data stores
+- each `story_id` can have many `chat_id` values
+- `chat_id` is also the LangGraph `thread_id`
 - Neo4j stores graph entities/relationships, Qdrant stores chunk vectors, and Redis stores transient ingestion lock + progress events
+- each assistant transcript item also stores `routing_reason` so the frontend can explain why graph, vector, or hybrid retrieval was chosen
+- graph answers persist the nodes, relationships, and normalized raw graph results used for the answer
+- vector answers persist `chunk_ids` and chunk payloads used for the answer
+- hybrid answers persist both graph and vector evidence together
 
 ### 7.2 Write Points
 
 - **`save_story()`** — called after ingestion completes; inserts story document with entity/relationship/chunk counts and the stored file name used for future selection
-- **`save_qa()`** — called after every query; uses `$push` to append Q&A pair to `qa` array
+- **`create_chat()`** — called after the first message in a new chat; inserts chat summary metadata into `chats`
+- **`update_chat_after_turn()`** — called after every assistant response; updates `updated_at`, `turn_count`, and last-message previews
+- **LangGraph `MongoDBSaver`** — automatically persists full query-agent state for each `thread_id` into the checkpoint collections
 
 ### 7.3 History Endpoints Data Flow
 
 `GET /api/stories` → lean projection (`_id`, `title`, `filename`, `display_name`, `status`, `created_at`, `entity_count`) → sidebar list / document selector by name
 
-`GET /api/stories/{story_id}/qa` → full `qa` array for a story → Q&A history panel
+`GET /api/stories/{story_id}/chats` → chat summaries for the selected story → chat sidebar / resume list
+
+`GET /api/stories/{story_id}/chats/{chat_id}/messages` → latest transcript snapshot for that thread → chat transcript panel with citations, routing reasons, and stored retrieval evidence
+
+`GET /api/stories/{story_id}/chunks` → ordered chunk list from Qdrant → chunk browser / evidence inspection panel
 
 ---
 
 ## 8. Graph Visualization (Frontend)
 
-The interactive graph is rendered using `react-force-graph-2d`. The user first selects a stored PDF/TXT by name, then the frontend calls `GET /api/stories/{story_id}/graph` for that selected document and renders all entities as nodes and all relationships as labeled edges.
+The interactive graph is rendered using `@react-sigma/core` on top of Graphology. Graphology acts as the frontend graph data layer, Sigma.js provides WebGL rendering, and `@react-sigma/layout-forceatlas2` is used for the default knowledge-graph layout. The user first selects a stored PDF/TXT by name, then the frontend calls `GET /api/stories/{story_id}/graph` for that selected document, loads the returned nodes and edges into a Graphology graph, and renders the result through Sigma. The frontend can also call `GET /api/stories/{story_id}/chunks` to show the chunk corpus for the same story, and can render `routing_reason` plus persisted retrieval evidence from the chat transcript endpoints.
+
+Why this stack is preferred for Story GraphRAG:
+- WebGL rendering remains responsive for dense story graphs with hundreds of nodes and edges
+- Graphology provides a proper graph data model with node/edge attributes instead of treating the graph as a flat render payload only
+- ForceAtlas2 gives a more professional knowledge-graph layout than a generic force-graph setup and leaves room for future graph metrics or search utilities
 
 **Node styling by entity type:**
 
@@ -690,49 +777,63 @@ The interactive graph is rendered using `react-force-graph-2d`. The user first s
 ```
 story-graphrag/
 ├── backend/
-│   ├── main.py                        # FastAPI app entrypoint
-│   ├── api/
-│   │   └── routes.py                  # All API route handlers
-│   ├── ingestion/
-│   │   ├── graph.py                   # Ingestion LangGraph definition + wiring
-│   │   ├── state.py                   # IngestionState TypedDict
-│   │   └── nodes/
-│   │       ├── loader.py              # RecursiveCharacterTextSplitter + LangChain Document wrapping
-│   │       ├── graph_extractor.py     # LLMGraphTransformer — extracts nodes + relationships together
-│   │       ├── gleaning.py            # Second-pass LLMGraphTransformer with additional_instructions
-│   │       ├── deduplication.py       # Alias grouping with structured output → builds alias_map
-│   │       ├── graph_builder.py       # Neo4j entity + relationship writes
-│   │       └── vector_embedder.py     # Qdrant chunk vector upserts
-│   ├── query/
-│   │   ├── graph.py                   # Query LangGraph definition
-│   │   ├── state.py                   # QueryState TypedDict
-│   │   └── nodes/
-│   │       ├── router.py              # Query type classifier (vector | graph | hybrid)
-│   │       ├── cypher_generator.py    # NL → Cypher via structured output
-│   │       ├── graph_retriever.py     # Neo4j Cypher execution
-│   │       ├── vector_retriever.py    # Qdrant similarity search
-│   │       └── answer_synthesizer.py  # Final answer + citations via structured output
-│   ├── db/
-│   │   ├── mongo.py                   # AsyncIOMotorClient setup for local MongoDB
-│   │   ├── neo4j.py                   # Async Neo4j driver setup for local Neo4j
-│   │   ├── qdrant.py                  # Qdrant client setup for local Qdrant
-│   │   ├── redis.py                   # Redis client setup for local Redis server
-│   │   └── history.py                 # save_story(), save_qa(), get_stories(), get_qa()
-│   ├── schemas/                        # Pydantic models for API + structured output
-│   └── requirements.txt
+│   ├── main.py                        # FastAPI app factory + lifespan bootstrap
+│   ├── create_index.py                # Startup index creation for story/chat MongoDB + Neo4j
+│   ├── pyproject.toml
+│   ├── .env.example
+│   ├── neo4j/
+│   │   └── docker-compose.yml         # Local Neo4j runner
+│   ├── qdrant/
+│   │   └── docker-compose.yml         # Local Qdrant runner
+│   ├── app/
+│   │   ├── core/
+│   │   │   ├── config.py              # Settings / env parsing
+│   │   │   ├── database.py            # MongoDB, Redis, Neo4j, Qdrant, and checkpointer startup/shutdown
+│   │   │   ├── llm_config.py          # Gemini + BGE providers + structured-output wrappers
+│   │   │   ├── logging.py             # Request context + logging config
+│   │   │   ├── dependencies.py
+│   │   │   ├── exceptions.py
+│   │   │   └── constants.py
+│   │   ├── graph_rag_agent/
+│   │   │   ├── ingestion/
+│   │   │   │   ├── graph.py           # Ingestion LangGraph definition + merge/dedup helpers
+│   │   │   │   ├── prompts.py
+│   │   │   │   └── state.py
+│   │   │   └── query/
+│   │   │       ├── graph.py           # Query LangGraph definition
+│   │   │       ├── prompts.py
+│   │   │       └── state.py
+│   │   ├── routers/
+│   │   │   ├── health.py
+│   │   │   └── stories.py
+│   │   ├── schemas/
+│   │   │   ├── common.py
+│   │   │   ├── graph.py
+│   │   │   ├── query.py
+│   │   │   └── story.py
+│   │   └── services/
+│   │       ├── container.py
+│   │       ├── chat_service.py
+│   │       ├── file_service.py
+│   │       ├── graph_service.py
+│   │       ├── job_service.py
+│   │       ├── story_service.py
+│   │       └── vector_service.py
+│   └── tests/
 ├── frontend/
 │   ├── src/
 │   │   ├── App.jsx
 │   │   └── components/
 │   │       ├── UploadPanel.jsx        # File upload + ingestion progress
-│   │       ├── GraphVisualization.jsx # react-force-graph-2d rendering
-│   │       ├── QueryInterface.jsx     # Question input + answer display
+│   │       ├── GraphVisualization.jsx # Sigma.js + Graphology rendering
+│   │       ├── QueryInterface.jsx     # Chat input + answer display
 │   │       ├── CitationPanel.jsx      # Cited chunks and graph nodes
 │   │       ├── HistorySidebar.jsx     # Past stories list
-│   │       └── QAHistory.jsx          # Past Q&A for current story
+│   │       ├── ChatSidebar.jsx        # Past chats for current story
+│   │       └── ChatTranscript.jsx     # Chat transcript for current story/chat
 │   ├── package.json
 │   └── vite.config.js
-├── docker-compose.yml
+├── documentation/
 └── README.md
 ```
 
@@ -741,78 +842,45 @@ story-graphrag/
 ## 10. Environment Variables
 
 ```env
-OPENAI_API_KEY=
-# Docker Compose local setup (default)
-NEO4J_URL=bolt://neo4j:7687
+GOOGLE_API_KEY=
+GOOGLE_CHAT_MODEL=gemini-3.1-flash-lite-preview
+EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
+EMBEDDING_DEVICE=cpu
+EMBEDDING_NORMALIZE=true
+
+# Local host setup defaults
+NEO4J_URL=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASS=password
-QDRANT_URL=http://qdrant:6333
-REDIS_URL=redis://redis:6379
-MONGODB_URL=mongodb://mongo:27017
+QDRANT_URL=http://localhost:6333
+REDIS_URL=redis://localhost:6379
+MONGODB_URL=mongodb://localhost:27017
 MONGODB_DB=story_graphrag
+CHECKPOINT_DB=
+CHECKPOINT_COLLECTION_NAME=langgraph_checkpoints
+CHECKPOINT_WRITES_COLLECTION_NAME=langgraph_checkpoint_writes
+UPLOAD_DIR=/tmp/story_graphrag_uploads
+CORS_ORIGINS=*
+CHAT_TITLE_MAX_LENGTH=80
+CHAT_PREVIEW_MAX_LENGTH=120
+CHAT_PROMPT_HISTORY_MESSAGES=12
+INFRASTRUCTURE_TIMEOUT_SECONDS=2
 ```
 
-If the backend is run outside Docker on the host machine, replace the service names above with `localhost` equivalents.
+Neo4j and Qdrant can be started from the compose files in `backend/neo4j` and `backend/qdrant`. MongoDB and Redis are expected to be running locally on their default ports.
 
 ---
 
 ## 11. Docker Compose
 
-```yaml
-version: "3.9"
-services:
-  backend:
-    build: ./backend
-    ports:
-      - "8000:8000"
-    env_file: .env
-    depends_on:
-      - neo4j
-      - qdrant
-      - redis
-      - mongo
+Current local infra files shipped in the repository:
 
-  frontend:
-    build: ./frontend
-    ports:
-      - "5173:5173"
-    depends_on:
-      - backend
+- `backend/neo4j/docker-compose.yml` — local Neo4j with ports `7474` and `7687`, persistent volume, and healthcheck
+- `backend/qdrant/docker-compose.yml` — local Qdrant with ports `6333` and `6334`, persistent volume, and healthcheck
 
-  mongo:
-    image: mongo:7
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongo_data:/data/db
+Current runtime expectation:
 
-  neo4j:
-    image: neo4j:5
-    ports:
-      - "7474:7474"
-      - "7687:7687"
-    environment:
-      NEO4J_AUTH: neo4j/password
-    volumes:
-      - neo4j_data:/data
-
-  qdrant:
-    image: qdrant/qdrant:latest
-    ports:
-      - "6333:6333"
-    volumes:
-      - qdrant_data:/qdrant/storage
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-
-volumes:
-  neo4j_data:
-  qdrant_data:
-  redis_data:
-  mongo_data:
-```
+- Neo4j runs from the dedicated Docker Compose file under `backend/neo4j`
+- Qdrant runs from the dedicated Docker Compose file under `backend/qdrant`
+- MongoDB runs as a local host service at `localhost:27017`
+- Redis runs as a local host service at `localhost:6379`

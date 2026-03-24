@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from neo4j import AsyncDriver
+from neo4j.graph import Node as Neo4jNode
+from neo4j.graph import Path as Neo4jPath
+from neo4j.graph import Relationship as Neo4jRelationship
 
 from app.core.config import Settings
 from app.core.constants import GRAPH_ENTITY_LABEL
 from app.core.exceptions import InfrastructureError
 from app.schemas.graph import GraphEdge, GraphNode, GraphResponse
+from app.schemas.story import GraphAnswerEvidence
 
 
 @dataclass(slots=True)
@@ -124,14 +129,68 @@ class GraphService:
             return [record.data() async for record in result]
 
     def normalize_graph_results(self, graph_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        normalized: list[dict[str, Any]] = []
+        return [self._serialize_mapping(row) for row in graph_results]
+
+    def build_answer_evidence(
+        self,
+        graph_results: list[dict[str, Any]] | None,
+    ) -> GraphAnswerEvidence | None:
+        if not graph_results:
+            return None
+
+        nodes: dict[str, GraphNode] = {}
+        relationships: dict[tuple[str, str, str], GraphEdge] = {}
+
+        def visit(value: Any) -> None:
+            if isinstance(value, Mapping):
+                kind = value.get("__kind__")
+                if kind == "node":
+                    node = GraphNode(
+                        id=str(value["id"]),
+                        label=str(value.get("label", value["id"])),
+                        type=str(value.get("type") or ""),
+                        description=_optional_str(value.get("description")),
+                    )
+                    nodes[node.id] = node
+                    return
+                if kind == "relationship":
+                    relationship = GraphEdge(
+                        source=str(value["source"]),
+                        target=str(value["target"]),
+                        relationship_type=str(value["relationship_type"]),
+                        description=_optional_str(value.get("description")),
+                    )
+                    relationships[
+                        (
+                            relationship.source,
+                            relationship.target,
+                            relationship.relationship_type,
+                        )
+                    ] = relationship
+                    return
+                if kind == "path":
+                    for node_value in value.get("nodes", []):
+                        visit(node_value)
+                    for relationship_value in value.get("relationships", []):
+                        visit(relationship_value)
+                    return
+
+                for nested_value in value.values():
+                    visit(nested_value)
+                return
+
+            if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+                for item in value:
+                    visit(item)
+
         for row in graph_results:
-            for key, value in row.items():
-                if hasattr(value, "items"):
-                    normalized.append(dict(value.items()))
-                else:
-                    normalized.append({"key": key, "value": value})
-        return normalized
+            visit(row)
+
+        return GraphAnswerEvidence(
+            nodes=list(nodes.values()),
+            relationships=list(relationships.values()),
+            raw_results=graph_results,
+        )
 
     def _sanitize_relationship_type(self, relationship_type: str) -> str:
         if relationship_type not in self.settings.allowed_relationship_types:
@@ -140,3 +199,60 @@ class GraphService:
             )
         return relationship_type
 
+    def _serialize_mapping(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        return {key: self._serialize_value(item) for key, item in value.items()}
+
+    def _serialize_value(self, value: Any) -> Any:
+        if isinstance(value, Neo4jNode):
+            return self._serialize_node(value)
+        if isinstance(value, Neo4jRelationship):
+            return self._serialize_relationship(value)
+        if isinstance(value, Neo4jPath):
+            return {
+                "__kind__": "path",
+                "nodes": [self._serialize_node(node) for node in value.nodes],
+                "relationships": [
+                    self._serialize_relationship(relationship)
+                    for relationship in value.relationships
+                ],
+            }
+        if isinstance(value, Mapping):
+            return self._serialize_mapping(value)
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            return [self._serialize_value(item) for item in value]
+        return value
+
+    def _serialize_node(self, node: Neo4jNode) -> dict[str, Any]:
+        properties = {key: self._serialize_value(item) for key, item in dict(node.items()).items()}
+        node_id = str(properties.get("name") or node.element_id)
+        return {
+            "__kind__": "node",
+            "id": node_id,
+            "label": node_id,
+            "type": _optional_str(properties.get("type")) or "",
+            "description": _optional_str(properties.get("description")),
+            "properties": properties,
+        }
+
+    def _serialize_relationship(self, relationship: Neo4jRelationship) -> dict[str, Any]:
+        properties = {
+            key: self._serialize_value(item) for key, item in dict(relationship.items()).items()
+        }
+        start_node = relationship.start_node
+        end_node = relationship.end_node
+        source = str(start_node.get("name") or start_node.element_id) if start_node else ""
+        target = str(end_node.get("name") or end_node.element_id) if end_node else ""
+        return {
+            "__kind__": "relationship",
+            "source": source,
+            "target": target,
+            "relationship_type": relationship.type,
+            "description": _optional_str(properties.get("description")),
+            "properties": properties,
+        }
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)

@@ -6,9 +6,8 @@ import logging
 from contextvars import ContextVar
 from uuid import uuid4
 
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import Response
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 _request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
 
@@ -46,17 +45,27 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
-class RequestContextMiddleware(BaseHTTPMiddleware):
+class RequestContextMiddleware:
     """Attach a request id to all logs emitted during a request."""
 
-    async def dispatch(self, request: Request, call_next) -> Response:
-        request_id = request.headers.get("X-Request-ID", str(uuid4()))
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request_id = Headers(scope=scope).get("X-Request-ID", str(uuid4()))
         token = _request_id_ctx.set(request_id)
+
+        async def send_with_request_id(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers["X-Request-ID"] = request_id
+            await send(message)
+
         try:
-            response = await call_next(request)
+            await self.app(scope, receive, send_with_request_id)
         finally:
             _request_id_ctx.reset(token)
-
-        response.headers["X-Request-ID"] = request_id
-        return response
-

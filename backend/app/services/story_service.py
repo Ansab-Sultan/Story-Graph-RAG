@@ -1,4 +1,4 @@
-"""Persistence helpers for stories and Q&A history."""
+"""Persistence helpers for story metadata."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.exceptions import StoryNotFoundError
-from app.schemas.story import QAHistoryItem, StoryDetail, StoryListItem
+from app.schemas.story import StoryDetail, StoryListItem
 
 
 @dataclass(slots=True)
@@ -45,7 +45,6 @@ class StoryService:
                 "relationship_count": 0,
                 "chunk_count": 0,
                 "created_at": now,
-                "qa": [],
             }
         )
 
@@ -79,30 +78,6 @@ class StoryService:
             },
         )
 
-    async def append_qa(
-        self,
-        story_id: str,
-        *,
-        question: str,
-        answer: str,
-        query_type: str,
-        citations: list[dict[str, object]],
-    ) -> None:
-        await self.stories.update_one(
-            {"_id": story_id},
-            {
-                "$push": {
-                    "qa": {
-                        "question": question,
-                        "answer": answer,
-                        "query_type": query_type,
-                        "citations": citations,
-                        "asked_at": datetime.now(UTC),
-                    }
-                }
-            },
-        )
-
     async def list_stories(self) -> list[StoryListItem]:
         cursor = self.stories.find({}, sort=[("created_at", -1)])
         items: list[StoryListItem] = []
@@ -127,16 +102,6 @@ class StoryService:
         if doc is None:
             raise StoryNotFoundError(f"Story '{story_id}' was not found.")
 
-        qa_items = [
-            QAHistoryItem(
-                question=item["question"],
-                answer=item["answer"],
-                query_type=item["query_type"],
-                citations=item.get("citations", []),
-                asked_at=item["asked_at"],
-            )
-            for item in doc.get("qa", [])
-        ]
         return StoryDetail(
             story_id=str(doc["_id"]),
             title=doc.get("title", doc.get("filename", "")),
@@ -147,10 +112,4 @@ class StoryService:
             entity_count=doc.get("entity_count"),
             relationship_count=doc.get("relationship_count"),
             chunk_count=doc.get("chunk_count"),
-            qa=qa_items,
         )
-
-    async def get_qa_history(self, story_id: str) -> list[QAHistoryItem]:
-        detail = await self.get_story_detail(story_id)
-        return detail.qa
-

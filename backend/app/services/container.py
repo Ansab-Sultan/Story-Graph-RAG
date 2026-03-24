@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from app.core.config import Settings
 from app.core.database import DatabaseManager
 from app.core.llm_config import LLMProviders
+from app.services.chat_service import ChatService
 from app.services.file_service import FileService
 from app.services.graph_service import GraphService
 from app.services.job_service import JobStateService
@@ -19,6 +20,7 @@ class ServiceContainer:
     settings: Settings
     file_service: FileService
     story_service: StoryService
+    chat_service: ChatService
     job_service: JobStateService
     graph_service: GraphService
     vector_service: VectorService
@@ -39,6 +41,7 @@ def build_service_container(
         settings=settings,
         file_service=FileService(settings=settings),
         story_service=StoryService(database=database_manager.mongo_db),
+        chat_service=ChatService(database=database_manager.mongo_db, settings=settings),
         job_service=JobStateService(redis=database_manager.redis, settings=settings),
         graph_service=GraphService(driver=database_manager.neo4j, settings=settings),
         vector_service=VectorService(

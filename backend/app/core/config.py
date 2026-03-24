@@ -4,16 +4,23 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.constants import (
     DEFAULT_ALLOWED_NODE_TYPES,
     DEFAULT_ALLOWED_RELATIONSHIP_TYPES,
+    DEFAULT_CHAT_PREVIEW_MAX_LENGTH,
+    DEFAULT_CHAT_PROMPT_HISTORY_MESSAGES,
+    DEFAULT_CHAT_TITLE_MAX_LENGTH,
     DEFAULT_CHUNK_OVERLAP,
     DEFAULT_CHUNK_SIZE,
+    DEFAULT_CHECKPOINT_COLLECTION_NAME,
+    DEFAULT_CHECKPOINT_WRITES_COLLECTION_NAME,
     DEFAULT_CORS_ORIGINS,
+    DEFAULT_INFRASTRUCTURE_TIMEOUT_SECONDS,
     DEFAULT_QUERY_TOP_K,
     DEFAULT_REDIS_LOCK_KEY,
     DEFAULT_SSE_POLL_INTERVAL_SECONDS,
@@ -36,12 +43,17 @@ class Settings(BaseSettings):
     debug: bool = Field(default=True, alias="DEBUG")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
-    openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
-    openai_chat_model: str = Field(default="gpt-4o-mini", alias="OPENAI_CHAT_MODEL")
-    openai_embedding_model: str = Field(
-        default="text-embedding-3-small",
-        alias="OPENAI_EMBEDDING_MODEL",
+    google_api_key: str | None = Field(default=None, alias="GOOGLE_API_KEY")
+    google_chat_model: str = Field(
+        default="gemini-3.1-flash-lite-preview",
+        alias="GOOGLE_CHAT_MODEL",
     )
+    embedding_model: str = Field(
+        default="BAAI/bge-small-en-v1.5",
+        alias="EMBEDDING_MODEL",
+    )
+    embedding_device: str = Field(default="cpu", alias="EMBEDDING_DEVICE")
+    embedding_normalize: bool = Field(default=True, alias="EMBEDDING_NORMALIZE")
 
     neo4j_url: str = Field(default="bolt://localhost:7687", alias="NEO4J_URL")
     neo4j_user: str = Field(default="neo4j", alias="NEO4J_USER")
@@ -50,9 +62,18 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="redis://localhost:6379", alias="REDIS_URL")
     mongodb_url: str = Field(default="mongodb://localhost:27017", alias="MONGODB_URL")
     mongodb_db: str = Field(default="story_graphrag", alias="MONGODB_DB")
+    checkpoint_db: str | None = Field(default=None, alias="CHECKPOINT_DB")
+    checkpoint_collection_name: str = Field(
+        default=DEFAULT_CHECKPOINT_COLLECTION_NAME,
+        alias="CHECKPOINT_COLLECTION_NAME",
+    )
+    checkpoint_writes_collection_name: str = Field(
+        default=DEFAULT_CHECKPOINT_WRITES_COLLECTION_NAME,
+        alias="CHECKPOINT_WRITES_COLLECTION_NAME",
+    )
 
     upload_dir: Path = Field(default=Path(DEFAULT_UPLOAD_DIR), alias="UPLOAD_DIR")
-    cors_origins: list[str] = Field(
+    cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: list(DEFAULT_CORS_ORIGINS),
         alias="CORS_ORIGINS",
     )
@@ -75,6 +96,22 @@ class Settings(BaseSettings):
     allowed_relationship_types: tuple[str, ...] = Field(
         default=DEFAULT_ALLOWED_RELATIONSHIP_TYPES,
         alias="ALLOWED_RELATIONSHIP_TYPES",
+    )
+    chat_title_max_length: int = Field(
+        default=DEFAULT_CHAT_TITLE_MAX_LENGTH,
+        alias="CHAT_TITLE_MAX_LENGTH",
+    )
+    chat_preview_max_length: int = Field(
+        default=DEFAULT_CHAT_PREVIEW_MAX_LENGTH,
+        alias="CHAT_PREVIEW_MAX_LENGTH",
+    )
+    chat_prompt_history_messages: int = Field(
+        default=DEFAULT_CHAT_PROMPT_HISTORY_MESSAGES,
+        alias="CHAT_PROMPT_HISTORY_MESSAGES",
+    )
+    infrastructure_timeout_seconds: float = Field(
+        default=DEFAULT_INFRASTRUCTURE_TIMEOUT_SECONDS,
+        alias="INFRASTRUCTURE_TIMEOUT_SECONDS",
     )
 
     @field_validator("cors_origins", mode="before")
@@ -102,6 +139,18 @@ class Settings(BaseSettings):
         if normalized in {"1", "true", "yes", "on", "debug"}:
             return True
         if normalized in {"0", "false", "no", "off", "release", "prod", "production"}:
+            return False
+        return bool(normalized)
+
+    @field_validator("embedding_normalize", mode="before")
+    @classmethod
+    def _parse_embedding_normalize(cls, value: bool | str) -> bool:
+        if isinstance(value, bool):
+            return value
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
             return False
         return bool(normalized)
 

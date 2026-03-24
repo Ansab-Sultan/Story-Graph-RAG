@@ -11,7 +11,7 @@
 ## 1. Overview
 
 ### 1.1 Product Summary
-Story GraphRAG is a full-stack AI application that allows users to upload any story, novel, or narrative document and ask deep, relationship-aware questions about it. Unlike traditional RAG systems that retrieve text by similarity, Story GraphRAG builds a knowledge graph of characters, events, places, and relationships from the story. Graph data is stored in local Neo4j, chunk embeddings are stored in local Qdrant, story/session history is stored in local MongoDB, and ingestion progress is coordinated through a local Redis server — enabling multi-hop reasoning that flat vector search fundamentally cannot do.
+Story GraphRAG is a full-stack AI application that allows users to upload any story, novel, or narrative document and ask deep, relationship-aware questions about it. Unlike traditional RAG systems that retrieve text by similarity, Story GraphRAG builds a knowledge graph of characters, events, places, and relationships from the story. Graph data is stored in local Neo4j, chunk embeddings are stored in local Qdrant, story metadata plus story-scoped chat metadata are stored in local MongoDB, and LangGraph conversation memory is persisted in MongoDB through the MongoDB checkpointer. Ingestion progress is coordinated through a local Redis server. The backend uses a Gemini chat model for extraction and answer generation, and a local BAAI embedding model for vector search, enabling multi-hop reasoning that flat vector search fundamentally cannot do.
 
 ### 1.2 Motivation
 Standard RAG works well for factual lookup but breaks down when a question requires reasoning across relationships — "Who are the enemies of Harry's allies?" or "Which characters indirectly caused the final battle?" are questions no similarity search can answer reliably. Graphs can. Stories are the perfect domain to demonstrate this gap publicly because everyone understands narratives, making the demo universally relatable.
@@ -43,6 +43,9 @@ Standard RAG works well for factual lookup but breaks down when a question requi
 - **As a user**, I want the system to cite which characters, events, or text passages it used to answer my question so that I can verify the answer.
 - **As a user**, I want to ask simple factual questions and still get fast, accurate answers so that the system works for both simple and complex queries.
 - **As a user**, I want to select the exact stored PDF or TXT by its name before asking a question so that answers come from the document I chose.
+- **As a user**, I want each stored story to support multiple independent chats so that I can explore different lines of questioning without mixing context.
+- **As a user**, I want follow-up questions inside the same chat to remember earlier turns so that the experience feels like a real chatbot instead of isolated one-off queries.
+- **As a user**, I want to see why the system chose graph, vector, or hybrid retrieval and what evidence it actually used so that I can trust and inspect the answer.
 - **As a developer**, I want clean API endpoints so that I can integrate the story analysis engine into other tools.
 
 ---
@@ -54,21 +57,23 @@ Standard RAG works well for factual lookup but breaks down when a question requi
 | # | Feature | Description | Priority |
 |---|---|---|---|
 | F1 | Story Upload | Upload exactly one story or novel at a time as a `.pdf` or `.txt` file; ingestion does not accept multiple files in a single run | P0 |
-| F2 | Entity & Relationship Extraction | Story is chunked using `RecursiveCharacterTextSplitter`, then `LLMGraphTransformer` extracts nodes and relationships together in one batched call. A gleaning pass catches missed entities, and a deduplication pass collapses aliases into canonical names before writing the knowledge graph to local Neo4j and chunk embeddings to local Qdrant | P0 |
-| F3 | Hybrid Retrieval Agent | Agentic query router that decides whether to use vector search from local Qdrant, graph traversal from local Neo4j, or both based on the question type | P0 |
-| F4 | Cited Answers | Every answer cites the specific characters, events, relationships, or text chunks it used | P0 |
+| F2 | Entity & Relationship Extraction | Story is chunked using `RecursiveCharacterTextSplitter`, then `LLMGraphTransformer` extracts nodes and relationships. A contextual gleaning pass is shown the first-pass extraction for the same chunk and asked for only genuinely new entities/relationships. A deduplication pass collapses aliases into canonical names, and the backend enforces code-level node/relationship deduplication before writing the graph to local Neo4j and chunk embeddings to local Qdrant | P0 |
+| F3 | Hybrid Retrieval Agent | Agentic query router that decides whether to use vector search from local Qdrant, graph traversal from local Neo4j, or both based on the question type, and stores a short routing reason explaining why that path was chosen | P0 |
+| F4 | Cited Answers + Retrieval Evidence | Every answer cites the specific characters, events, relationships, or text chunks it used, and the full retrieval evidence is persisted with each assistant chat message for frontend inspection later | P0 |
 | F5 | Ingestion Progress Streaming | Real-time progress updates shown to the user during the extraction and graph building phase, coordinated through the local Redis server | P0 |
 | F6 | Named Story Selection | Each stored PDF or TXT is saved and surfaced by its file name, and the user must select that named document before asking questions | P0 |
+| F7 | Story-Scoped Multi-Chat Memory | Every `story_id` can have multiple chats, each chat has its own `chat_id`, and the query agent remembers prior turns inside that chat using LangGraph MongoDB checkpoint persistence | P0 |
 
 ### 4.2 Enhanced Features (Post-MVP)
 
 | # | Feature | Description | Priority |
 |---|---|---|---|
-| F7 | Interactive Graph Visualization | Visual, interactive force-directed graph of all characters and relationships rendered in the frontend using react-force-graph | P1 |
-| F8 | Multi-Story Library | Persist multiple previously ingested stories and let the user switch between them by document name; each gets its own isolated Neo4j subgraph, Qdrant collection, and MongoDB history record | P1 |
-| F9 | Story History & Past Q&A | All stories and their Q&A sessions are persisted in local MongoDB; users can reload and continue past sessions | P1 |
-| F10 | Relationship Deep Dive | Click any character or relationship in the graph to get a detailed AI-generated summary of that entity | P2 |
-| F11 | Conflict & Theme Detection | Agent automatically identifies and surfaces major conflicts, themes, and character arcs without the user asking | P2 |
+| F8 | Interactive Graph Visualization | Visual, interactive graph explorer of all characters and relationships rendered in the frontend using `@react-sigma/core` + Graphology, with WebGL rendering and ForceAtlas2 layout for a professional knowledge-graph experience | P1 |
+| F9 | Multi-Story Library | Persist multiple previously ingested stories and let the user switch between them by document name; each gets its own isolated Neo4j subgraph, Qdrant collection, chat set, and MongoDB history record | P1 |
+| F10 | Chat History & Resume | Each story exposes its past chats so users can reopen an old conversation, continue it with preserved context, and inspect routing reasons plus retrieval evidence for every assistant turn | P1 |
+| F11 | Chunk Browser | Frontend can request and display all stored chunks for a selected story so users can inspect the chunk corpus alongside the graph | P1 |
+| F12 | Relationship Deep Dive | Click any character or relationship in the graph to get a detailed AI-generated summary of that entity | P2 |
+| F13 | Conflict & Theme Detection | Agent automatically identifies and surfaces major conflicts, themes, and character arcs without the user asking | P2 |
 
 ---
 
@@ -98,12 +103,18 @@ System processes the file:
   [✓ Extracting entities & relationships — chunk 4/20...]
   [✓ Writing graph entities and relationships to local Neo4j...]
   [✓ Writing chunk embeddings to local Qdrant...]
-  [✓ Saving story metadata and history record to local MongoDB...]
+  [✓ Saving story metadata to local MongoDB...]
   [✓ Story ready!]
         ↓
 Stored story is listed in the library by file name
         ↓
 User selects the desired PDF/TXT by name
+        ↓
+Frontend loads available chats for that `story_id`
+        ↓
+User opens an existing chat or sends the first message without a `chat_id`
+        ↓
+If no `chat_id` was sent, backend creates a new `chat_id` and uses it as the LangGraph `thread_id`
         ↓
 User sees interactive graph visualization (characters, places, events)
         ↓
@@ -114,9 +125,9 @@ Agent routes the question:
   → Relational: Neo4j traversal → Answer with relationship citations
   → Complex: Both → Merged answer with combined citations
         ↓
-Answer displayed with cited sources (chunks and/or graph nodes/edges)
+Answer displayed with cited sources (chunks and/or graph nodes/edges), routing reason, and persisted retrieval evidence
         ↓
-Q&A persisted to local MongoDB for session history
+Assistant turn is persisted to the story-scoped chat transcript, and future turns in the same chat reuse the saved LangGraph memory
 ```
 
 ---

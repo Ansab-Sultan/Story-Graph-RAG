@@ -45,9 +45,9 @@ class StoryNotReadyError(StoryGraphError):
     error_code = "story_not_ready"
 
 
-class EmptyGraphResultError(StoryGraphError):
+class ChatNotFoundError(StoryGraphError):
     status_code = status.HTTP_404_NOT_FOUND
-    error_code = "empty_graph_result"
+    error_code = "chat_not_found"
 
 
 class InfrastructureError(StoryGraphError):
