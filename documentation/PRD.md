@@ -11,7 +11,7 @@
 ## 1. Overview
 
 ### 1.1 Product Summary
-Story GraphRAG is a full-stack AI application that allows users to upload any story, novel, or narrative document and ask deep, relationship-aware questions about it. Unlike traditional RAG systems that retrieve text by similarity, Story GraphRAG builds a knowledge graph of characters, events, places, and relationships from the story. Graph data is stored in local Neo4j, chunk embeddings are stored in local Qdrant, story metadata plus story-scoped chat metadata are stored in local MongoDB, and LangGraph conversation memory is persisted in MongoDB through the MongoDB checkpointer. Ingestion progress is coordinated through a local Redis server. The backend uses a Gemini chat model for extraction and answer generation, and a local BAAI embedding model for vector search, enabling multi-hop reasoning that flat vector search fundamentally cannot do.
+Story GraphRAG is a full-stack AI application that allows users to upload any story, novel, or narrative document and ask deep, relationship-aware questions about it. Unlike traditional RAG systems that retrieve text by similarity, Story GraphRAG builds a knowledge graph of characters, events, places, and relationships from the story. Graph data is stored in local Neo4j, retrieval-oriented chunk embeddings are stored in local Qdrant, story metadata plus story-scoped chat metadata are stored in local MongoDB, and LangGraph conversation memory is persisted in MongoDB through the MongoDB checkpointer. Ingestion progress is coordinated through a local Redis server. The backend uses a high-context chat model for extraction and answer generation, and a local BAAI embedding model for vector search, enabling multi-hop reasoning that flat vector search fundamentally cannot do.
 
 ### 1.2 Motivation
 Standard RAG works well for factual lookup but breaks down when a question requires reasoning across relationships — "Who are the enemies of Harry's allies?" or "Which characters indirectly caused the final battle?" are questions no similarity search can answer reliably. Graphs can. Stories are the perfect domain to demonstrate this gap publicly because everyone understands narratives, making the demo universally relatable.
@@ -57,7 +57,7 @@ Standard RAG works well for factual lookup but breaks down when a question requi
 | # | Feature | Description | Priority |
 |---|---|---|---|
 | F1 | Story Upload | Upload exactly one story or novel at a time as a `.pdf` or `.txt` file; ingestion does not accept multiple files in a single run | P0 |
-| F2 | Entity & Relationship Extraction | Story is chunked using `RecursiveCharacterTextSplitter`, then `LLMGraphTransformer` extracts nodes and relationships. A contextual gleaning pass is shown the first-pass extraction for the same chunk and asked for only genuinely new entities/relationships. A deduplication pass collapses aliases into canonical names, and the backend enforces code-level node/relationship deduplication before writing the graph to local Neo4j and chunk embeddings to local Qdrant | P0 |
+| F2 | Entity & Relationship Extraction | Story is split into two chunk streams from the same raw text: very large graph chunks for `LLMGraphTransformer` and contextual gleaning, and smaller retrieval-oriented vector chunks for Qdrant. A deduplication pass collapses aliases into canonical names, and the backend enforces code-level node/relationship deduplication before writing the graph to local Neo4j and vector chunks to local Qdrant | P0 |
 | F3 | Hybrid Retrieval Agent | Agentic query router that decides whether to use vector search from local Qdrant, graph traversal from local Neo4j, or both based on the question type, and stores a short routing reason explaining why that path was chosen | P0 |
 | F4 | Cited Answers + Retrieval Evidence | Every answer cites the specific characters, events, relationships, or text chunks it used, and the full retrieval evidence is persisted with each assistant chat message for frontend inspection later | P0 |
 | F5 | Ingestion Progress Streaming | Real-time progress updates shown to the user during the extraction and graph building phase, coordinated through the local Redis server | P0 |
@@ -99,10 +99,10 @@ This is the core product requirement that defines the retrieval architecture:
 User uploads one story (.pdf or .txt)
         ↓
 System processes the file:
-  [✓ Chunking document...]
-  [✓ Extracting entities & relationships — chunk 4/20...]
+  [✓ Building graph chunks and vector chunks...]
+  [✓ Extracting entities & relationships from large graph chunks...]
   [✓ Writing graph entities and relationships to local Neo4j...]
-  [✓ Writing chunk embeddings to local Qdrant...]
+  [✓ Writing retrieval chunks and embeddings to local Qdrant...]
   [✓ Saving story metadata to local MongoDB...]
   [✓ Story ready!]
         ↓

@@ -90,10 +90,25 @@ export const ChatArea = () => {
 
   if (!selectedStoryId) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center text-gray-500 p-8 text-center bg-[var(--background)]">
-        <Bot className="w-12 h-12 mb-4 opacity-20" />
-        <h3 className="text-lg font-medium text-[var(--foreground)]">No Story Selected</h3>
-        <p className="mt-2 text-sm">Select a story from the library to start analyzing and chatting.</p>
+      <div className="flex-1 flex flex-col items-center justify-center p-12 text-center bg-[var(--background)] animate-in fade-in duration-700">
+        <div className="relative mb-6">
+          <div className="absolute inset-0 bg-[var(--color-primary)] blur-[60px] opacity-10 animate-pulse" />
+          <div className="relative w-20 h-20 rounded-2xl bg-[var(--color-surface)] border border-white/5 flex items-center justify-center shadow-xl">
+            <Bot className="w-10 h-10 text-[var(--color-muted)] opacity-40 group-hover:opacity-100 transition-premium" />
+          </div>
+        </div>
+        <h3 className="text-xl font-black text-[var(--text-primary)] tracking-tight mb-2">Neural Link Awaiting</h3>
+        <p className="max-w-[280px] text-sm text-[var(--color-muted)] leading-relaxed font-medium">
+          Select a story from your library to initialize the graph agent and begin deep-narrative interrogation.
+        </p>
+        
+        <div className="mt-8 flex flex-col gap-3 w-full max-w-[240px]">
+          <div className="h-px w-full bg-gradient-to-r from-transparent via-[var(--color-border)] to-transparent" />
+          <div className="flex items-center justify-center gap-2 text-[10px] uppercase font-black text-[var(--color-muted)] tracking-widest">
+            <div className="w-1 h-1 rounded-full bg-[var(--color-muted)] animate-pulse" />
+            System Idle
+          </div>
+        </div>
       </div>
     );
   }
@@ -101,67 +116,71 @@ export const ChatArea = () => {
   return (
     <div className="flex flex-col h-full bg-[var(--background)]">
       {/* Header */}
-      <div className="p-4 border-b border-[var(--color-border)] bg-[var(--color-surface)] shrink-0 flex items-center justify-between shadow-sm">
-        <h2 className="font-semibold text-[var(--foreground)] tracking-tight">Graph Agent</h2>
+      <div className="px-6 border-b border-[var(--color-border)] bg-[var(--color-surface)] shrink-0 flex items-center justify-between shadow-sm h-16">
+        <h2 className="font-semibold text-[var(--text-primary)] tracking-tight">Graph Agent</h2>
         {selectedChatId && (
-          <span className="text-xs bg-slate-100 dark:bg-slate-800 text-gray-500 px-2 py-1 rounded-md font-mono border border-[var(--color-border)]">
+          <span className="text-[10px] bg-[var(--surface-secondary)] text-[var(--color-muted)] px-2 py-1 rounded-md font-black uppercase tracking-widest border border-[var(--color-border)]">
             {selectedChatId.split("-")[0]}
           </span>
         )}
       </div>
 
-      {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-6">
-        {messages.length === 0 ? (
+        {!Array.isArray(messages) || messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-gray-400">
             <Bot className="w-10 h-10 mb-3 opacity-30" />
             <p className="text-sm">Ask me about characters, events, or relationships in the story.</p>
             <div className="mt-6 flex flex-col gap-2 w-full max-w-xs">
-              <button onClick={() => setInput("Who are the main characters?")} className="text-xs text-left px-3 py-2 bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] border border-[var(--color-border)] rounded-md transition-colors">"Who are the main characters?"</button>
-              <button onClick={() => setInput("What events led to the climax?")} className="text-xs text-left px-3 py-2 bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] border border-[var(--color-border)] rounded-md transition-colors">"What events led to the climax?"</button>
-              <button onClick={() => setInput("Describe the relationships of the protagonist.")} className="text-xs text-left px-3 py-2 bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] border border-[var(--color-border)] rounded-md transition-colors">"Describe the relationships of the protagonist."</button>
+              <button onClick={() => setInput("Who are the main characters?")} className="text-xs text-left px-3 py-2 bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] border border-[var(--color-border)] rounded-md transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md cursor-pointer">"Who are the main characters?"</button>
+              <button onClick={() => setInput("What events led to the climax?")} className="text-xs text-left px-3 py-2 bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] border border-[var(--color-border)] rounded-md transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md cursor-pointer">"What events led to the climax?"</button>
+              <button onClick={() => setInput("Describe the relationships of the protagonist.")} className="text-xs text-left px-3 py-2 bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] border border-[var(--color-border)] rounded-md transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md cursor-pointer">"Describe the relationships of the protagonist."</button>
             </div>
           </div>
         ) : (
           messages.map((msg, i) => (
-            <div key={i} className={clsx("flex gap-3", msg.type === "user" ? "justify-end" : "justify-start")}>
+            <div
+              key={i}
+              className={clsx(
+                "flex mb-8 animate-in slide-in-from-bottom-2 duration-500 transition-premium",
+                msg.type === "user" ? "justify-end" : "justify-start gap-4"
+              )}
+            >
               {msg.type === "assistant" && (
-                <div className="w-8 h-8 rounded-full bg-[var(--color-primary)] text-white flex items-center justify-center shrink-0 shadow-sm mt-1">
+                <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-[var(--color-primary)] to-[var(--color-secondary)] text-white flex items-center justify-center shrink-0 shadow-lg mt-1 accent-glow">
                   <Bot className="w-5 h-5" />
                 </div>
               )}
               
-              <div 
+              <div
                 className={clsx(
-                  "max-w-[85%] rounded-2xl p-4 shadow-sm",
-                  msg.type === "user" 
-                    ? "bg-[var(--color-primary)] text-white rounded-br-none" 
-                    : "bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--foreground)] rounded-bl-none"
+                  "max-w-[85%] px-6 py-4 rounded-2xl transition-premium relative",
+                  msg.type === "user"
+                    ? "bg-[var(--color-primary)] text-white border-[var(--color-primary)]/20 rounded-tr-none shadow-blue-500/10"
+                    : "bg-[var(--surface-secondary)] border border-[var(--color-border)] text-[var(--text-primary)] rounded-tl-none glass-panel"
                 )}
               >
-                {msg.type === "user" ? (
-                  <div className="text-sm whitespace-pre-wrap">{msg.content}</div>
-                ) : (
-                  <div className="flex flex-col">
-                    <div className="prose prose-sm dark:prose-invert max-w-none prose-p:leading-relaxed">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {msg.content}
-                      </ReactMarkdown>
-                    </div>
-                    
-                    {(msg.citations || msg.routing_reason) && (
-                      <EvidenceDrawer 
-                        citations={msg.citations || []} 
-                        routingReason={msg.routing_reason} 
-                        queryType={msg.query_type}
-                      />
-                    )}
+                <div className={clsx(
+                  "prose prose-sm max-w-none prose-p:leading-relaxed",
+                  msg.type === "user" ? "text-white prose-invert" : "text-[var(--text-primary)] dark:prose-invert"
+                )}>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {msg.content}
+                  </ReactMarkdown>
+                </div>
+
+                {msg.type === "assistant" && (msg.citations || msg.routing_reason) && (
+                  <div className="mt-4 pt-4 border-t border-[var(--color-border)]/50">
+                    <EvidenceDrawer 
+                      citations={msg.citations || []} 
+                      routingReason={msg.routing_reason} 
+                      queryType={msg.query_type}
+                    />
                   </div>
                 )}
               </div>
 
               {msg.type === "user" && (
-                <div className="w-8 h-8 rounded-full bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-300 flex items-center justify-center shrink-0 mt-1">
+                <div className="w-9 h-9 rounded-xl bg-[var(--surface-secondary)] border border-[var(--color-border)] text-[var(--text-secondary)] flex items-center justify-center shrink-0 shadow-sm mt-1 ml-4 glass-panel">
                   <User className="w-5 h-5" />
                 </div>
               )}
@@ -197,7 +216,7 @@ export const ChatArea = () => {
           <button
             type="submit"
             disabled={!input.trim() || isSending}
-            className="absolute right-2 p-2 bg-[var(--color-primary)] text-white rounded-full hover:bg-[var(--color-primary-hover)] disabled:bg-gray-300 dark:disabled:bg-slate-800 disabled:text-gray-400 transition-colors shadow-sm"
+            className="absolute right-2 p-2 bg-[var(--color-primary)] text-white rounded-full hover:bg-[var(--color-primary-hover)] disabled:bg-gray-300 dark:disabled:bg-slate-800 disabled:text-gray-400 transition-all duration-200 hover:scale-110 active:scale-95 shadow-sm cursor-pointer disabled:cursor-not-allowed"
           >
             <Send className="w-4 h-4" />
           </button>

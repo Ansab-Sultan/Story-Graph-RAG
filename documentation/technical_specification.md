@@ -50,7 +50,7 @@
 | Query Memory | LangGraph `MongoDBSaver` | Persists query-agent state by `thread_id`, where `thread_id == chat_id` |
 | LLM | Gemini `gemini-3.1-flash-lite-preview` | Graph extraction, deduplication, routing, Cypher generation, and answer generation |
 | Graph Extraction | LangChain `LLMGraphTransformer` | Extracts nodes + relationships together in one async batched call using function calling |
-| Text Splitting | LangChain `RecursiveCharacterTextSplitter` | Pure text chunking — no LLM, 600 tokens, 100 overlap |
+| Text Splitting | LangChain `RecursiveCharacterTextSplitter` | Pure text chunking with two profiles: large graph chunks (`GRAPH_CHUNK_SIZE=9000`, `GRAPH_CHUNK_OVERLAP=1000`) and smaller vector chunks (`VECTOR_CHUNK_SIZE=600`, `VECTOR_CHUNK_OVERLAP=100`) |
 | Structured Output | LangChain `.with_structured_output()` | Type-safe responses for deduplication, routing, Cypher generation, and answer synthesis |
 | Graph Database | Local Neo4j | Self-hosted graph storage and Cypher traversal on the developer machine |
 | Vector Database | Local Qdrant | Self-hosted semantic similarity search for chunk retrieval, currently run from `backend/qdrant/docker-compose.yml` |
@@ -77,7 +77,8 @@ class IngestionState(TypedDict):
     story_id: str                      # unique ID for this story (= job_id)
     title: str                         # filename or user-provided title
     raw_text: str                      # full extracted text from the uploaded file
-    chunks: list[dict]                 # text chunks with metadata (600 tokens, 100 overlap)
+    graph_chunks: list[dict]           # large chunks for graph extraction + gleaning
+    vector_chunks: list[dict]          # smaller retrieval chunks for Qdrant
     graph_docs: list                   # raw output from LLMGraphTransformer (nodes + relationships)
     alias_map: dict[str, str]          # deduplication map e.g. {"Sherlock": "Holmes"}
     graph_built: bool                  # True once Neo4j write is complete
@@ -90,40 +91,61 @@ class IngestionState(TypedDict):
 #### Document Loader Node
 - Accepts the uploaded file path
 - Extracts raw text from `.pdf` (using `pypdf`) or `.txt`
-- Uses `RecursiveCharacterTextSplitter` with **600 tokens, 100-token overlap** — no LLM involved at this stage
-- Wraps each chunk as a LangChain `Document` with metadata: `story_id`, `chunk_id`, `chunk_index`, `page_number`
+- Builds two chunk streams from the same `raw_text` using `RecursiveCharacterTextSplitter` — no LLM involved at this stage
+- Graph chunks use `GRAPH_CHUNK_SIZE=9000` and `GRAPH_CHUNK_OVERLAP=1000`
+- Vector chunks use `VECTOR_CHUNK_SIZE=600` and `VECTOR_CHUNK_OVERLAP=100`
+- Wraps each chunk as a LangChain `Document` with metadata: `story_id`, `chunk_id`, `chunk_index`, and `chunk_kind`
 
 ```python
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 
 def document_loader_node(state: IngestionState) -> dict:
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=600,
-        chunk_overlap=100
+    graph_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=9000,
+        chunk_overlap=1000,
     )
-    raw_chunks = splitter.split_text(state["raw_text"])
+    vector_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=600,
+        chunk_overlap=100,
+    )
 
-    chunks = [
+    graph_chunks = [
+        Document(
+            page_content=chunk,
+            metadata={
+                "story_id": state["story_id"],
+                "chunk_id": f"{state['story_id']}_graph_chunk_{i}",
+                "chunk_index": i,
+                "chunk_kind": "graph",
+            }
+        )
+        for i, chunk in enumerate(graph_splitter.split_text(state["raw_text"]))
+    ]
+
+    vector_chunks = [
         Document(
             page_content=chunk,
             metadata={
                 "story_id": state["story_id"],
                 "chunk_id": f"{state['story_id']}_chunk_{i}",
-                "chunk_index": i
+                "chunk_index": i,
+                "chunk_kind": "vector",
             }
         )
-        for i, chunk in enumerate(raw_chunks)
+        for i, chunk in enumerate(vector_splitter.split_text(state["raw_text"]))
     ]
 
     return {
-        "chunks": chunks,
-        "progress": state["progress"] + [f"✓ Split into {len(chunks)} chunks"]
+        "graph_chunks": graph_chunks,
+        "vector_chunks": vector_chunks,
+        "progress": state["progress"]
+        + [f"✓ Built {len(graph_chunks)} graph chunks and {len(vector_chunks)} vector chunks"],
     }
 ```
 
 #### Graph Extractor Node
-- Passes all LangChain `Document` chunks to `LLMGraphTransformer` in a **single async batched call**
+- Passes the large `graph_chunks` to `LLMGraphTransformer` in a **single async batched call**
 - `LLMGraphTransformer` extracts **both nodes and relationships** together — no separate entity or relationship extraction steps needed
 - `allowed_nodes`, `allowed_relationships`, and `node_properties` are always passed to keep the graph consistent and queryable
 
@@ -149,24 +171,25 @@ transformer = LLMGraphTransformer(
 
 async def graph_extractor_node(state: IngestionState) -> dict:
     # Single async batched call — returns nodes + relationships per chunk
-    graph_docs = await transformer.aconvert_to_graph_documents(state["chunks"])
+    graph_docs = await transformer.aconvert_to_graph_documents(state["graph_chunks"])
 
     return {
         "graph_docs": graph_docs,
-        "progress": state["progress"] + [f"✓ Extracted graph from {len(state['chunks'])} chunks"]
+        "progress": state["progress"]
+        + [f"✓ Extracted graph from {len(state['graph_chunks'])} graph chunks"]
     }
 ```
 
 #### Gleaning Node
-- Runs a second LLM pass per chunk
-- Builds a contextual prompt that includes the nodes and relationships already extracted from that exact chunk
+- Runs a second LLM pass per graph chunk
+- Builds a contextual prompt that includes the nodes and relationships already extracted from that exact graph chunk
 - Asks for only genuinely new entities and relationships that are explicitly present in the text
 - Merges the second-pass result with code-level node and relationship deduplication instead of trusting the prompt alone
 
 ```python
 async def gleaning_node(state: IngestionState) -> dict:
     merged = []
-    for chunk, original_doc in zip(state["chunks"], state["graph_docs"], strict=False):
+    for chunk, original_doc in zip(state["graph_chunks"], state["graph_docs"], strict=False):
         existing_graph_context = format_existing_graph_context(original_doc)
         transformer_glean = build_contextual_gleaning_transformer(
             settings,
@@ -276,9 +299,9 @@ async def graph_builder_node(state: IngestionState) -> dict:
 ```
 
 #### Vector Embedder Node
-- Embeds the raw text chunks with local `BAAI/bge-small-en-v1.5`
-- Upserts chunks and vectors into a local Qdrant collection named `story_{story_id}`
-- Stores chunk metadata alongside vectors for cited retrieval
+- Embeds the smaller `vector_chunks` with local `BAAI/bge-small-en-v1.5`
+- Upserts vector chunks and vectors into a local Qdrant collection named `story_{story_id}`
+- Stores vector chunk metadata alongside vectors for cited retrieval
 - Infers the collection vector size from the active embedding model before collection creation
 - **This is the only place document embeddings are created** in the ingestion pipeline
 
@@ -286,7 +309,7 @@ async def graph_builder_node(state: IngestionState) -> dict:
 from langchain_community.embeddings import HuggingFaceBgeEmbeddings
 
 async def vector_embedder_node(state: IngestionState) -> dict:
-    texts = [c.page_content for c in state["chunks"]]
+    texts = [c.page_content for c in state["vector_chunks"]]
     embeddings_model = HuggingFaceBgeEmbeddings(
         model_name="BAAI/bge-small-en-v1.5",
         model_kwargs={"device": "cpu"},
@@ -305,19 +328,20 @@ async def vector_embedder_node(state: IngestionState) -> dict:
             id=i,
             vector=embeddings[i],
             payload={
-                "chunk_id": state["chunks"][i].metadata["chunk_id"],
-                "chunk_index": state["chunks"][i].metadata["chunk_index"],
-                "text": state["chunks"][i].page_content,
-                **state["chunks"][i].metadata,
+                "chunk_id": state["vector_chunks"][i].metadata["chunk_id"],
+                "chunk_index": state["vector_chunks"][i].metadata["chunk_index"],
+                "text": state["vector_chunks"][i].page_content,
+                **state["vector_chunks"][i].metadata,
             }
         )
-        for i in range(len(state["chunks"]))
+        for i in range(len(state["vector_chunks"]))
     ]
     qdrant.upsert(collection_name=f"story_{state['story_id']}", points=points)
 
     return {
         "vectors_stored": True,
-        "progress": state["progress"] + [f"✓ {len(state['chunks'])} chunks embedded into local Qdrant"]
+        "progress": state["progress"]
+        + [f"✓ {len(state['vector_chunks'])} vector chunks embedded into local Qdrant"]
     }
 ```
 

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from operator import add
+from typing import Annotated, Any, TypedDict
 
 
 class IngestionState(TypedDict):
@@ -10,10 +11,10 @@ class IngestionState(TypedDict):
     title: str
     file_path: str
     raw_text: str
-    chunks: list[Any]
+    graph_chunks: list[Any]
+    vector_chunks: list[Any]
     graph_docs: list[Any]
     alias_map: dict[str, str]
     graph_built: bool
     vectors_stored: bool
-    progress: list[str]
-
+    progress: Annotated[list[str], add]

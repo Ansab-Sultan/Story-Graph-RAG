@@ -1,30 +1,31 @@
 """Static constants shared across the backend."""
 
-DEFAULT_ALLOWED_NODE_TYPES = (
-    "CHARACTER",
-    "PLACE",
-    "EVENT",
-    "OBJECT",
-    "THEME",
-)
+GRAPH_EXTRACTION_INSTRUCTIONS = """\
+You are extracting a knowledge graph from a narrative story.
 
-DEFAULT_ALLOWED_RELATIONSHIP_TYPES = (
-    "FRIENDS_WITH",
-    "ENEMY_OF",
-    "LOVES",
-    "BETRAYED",
-    "KILLED",
-    "PRESENT_AT",
-    "CAUSED",
-    "LOCATED_IN",
-    "LOYAL_TO",
-)
+Node type conventions:
+- Use UPPERCASE_SNAKE_CASE for all node types (e.g., CHARACTER, PLACE, MAGICAL_ARTIFACT)
+- Be specific: prefer WEAPON over OBJECT, KINGDOM over PLACE when the text warrants it
+- Always include a 'description' property with a brief summary
+
+Relationship type conventions:
+- Use UPPERCASE_SNAKE_CASE for all relationship types (e.g., FRIENDS_WITH, RULES_OVER)
+- Capture the directional nature: (Character)-[BETRAYED]->(Character)
+- Be specific: prefer MENTOR_OF over FRIENDS_WITH when appropriate
+- Always include a 'description' property explaining the relationship context
+
+Extract ALL meaningful entities and relationships you find. Do not limit yourself
+to predefined categories. If a character wields a sword, create the WIELDS relationship.
+If a prophecy foretells an event, create FORETELLS. Be thorough.
+"""
 
 SUPPORTED_EXTENSIONS = frozenset({".pdf", ".txt"})
 DEFAULT_CORS_ORIGINS = ("*",)
 DEFAULT_UPLOAD_DIR = "/tmp/story_graphrag_uploads"
-DEFAULT_CHUNK_SIZE = 600
-DEFAULT_CHUNK_OVERLAP = 100
+DEFAULT_VECTOR_CHUNK_SIZE = 600
+DEFAULT_VECTOR_CHUNK_OVERLAP = 100
+DEFAULT_GRAPH_CHUNK_SIZE = 9000
+DEFAULT_GRAPH_CHUNK_OVERLAP = 1000
 DEFAULT_QUERY_TOP_K = 4
 DEFAULT_SSE_POLL_INTERVAL_SECONDS = 0.5
 DEFAULT_REDIS_LOCK_KEY = "story-graphrag:ingestion-lock"

@@ -4,7 +4,7 @@
  */
 
 export interface Story {
-  _id: string;
+  story_id: string;
   title: string;
   filename: string;
   display_name: string;
@@ -40,6 +40,25 @@ export interface TranscriptItem {
   evidence?: any;
 }
 
+export interface IngestionProgress {
+  node: string;
+  progress: string;
+  status?: string;
+  stage?: string;
+  step?: number;
+  total_steps?: number;
+  progress_percent?: number;
+  timestamp: string;
+}
+
+export interface IngestionJob {
+  story_id: string;
+  filename: string;
+  status: 'queued' | 'running' | 'complete' | 'error';
+  progress: IngestionProgress[];
+  error?: string;
+}
+
 export interface GraphData {
   nodes: Array<{ id: string; label: string; group?: string; [key: string]: any }>;
   edges: Array<{ source: string; target: string; label?: string; [key: string]: any }>;
@@ -61,7 +80,11 @@ export const api = {
   getChatMessages: async (storyId: string, chatId: string): Promise<TranscriptItem[]> => {
     const res = await fetch(`/api/stories/${storyId}/chats/${chatId}/messages`);
     if (!res.ok) throw new Error("Failed to fetch messages");
-    return res.json();
+    const data = await res.json();
+    return (data.messages || []).map((m: any) => ({
+      ...m,
+      type: m.role || m.type // map role (backend) to type (frontend)
+    }));
   },
 
   sendMessage: async (storyId: string, message: string, chatId?: string) => {
@@ -84,5 +107,12 @@ export const api = {
     const res = await fetch(`/api/stories/${storyId}/chunks`);
     if (!res.ok) throw new Error("Failed to fetch chunks");
     return res.json();
+  },
+
+  deleteStory: async (storyId: string): Promise<void> => {
+    const res = await fetch(`/api/stories/${storyId}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) throw new Error("Failed to delete story");
   }
 };

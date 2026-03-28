@@ -1,4 +1,4 @@
-"""Factories for Gemini and local embedding components."""
+"""Factories for Mistral AI and local embedding components."""
 
 from __future__ import annotations
 
@@ -9,7 +9,10 @@ from textwrap import dedent
 from langchain_community.embeddings import HuggingFaceBgeEmbeddings
 from langchain_core.embeddings import Embeddings
 from langchain_experimental.graph_transformers import LLMGraphTransformer
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_mistralai import ChatMistralAI
+
+# from langchain_google_genai import ChatGoogleGenerativeAI  # Gemini — commented out
+
 from pydantic import BaseModel, Field
 
 from app.core.config import Settings
@@ -27,7 +30,7 @@ class DeduplicationOutput(BaseModel):
 
 @dataclass(slots=True)
 class LLMProviders:
-    chat_llm: ChatGoogleGenerativeAI
+    chat_llm: ChatMistralAI
     embeddings: Embeddings
     deduplication_llm: object
     router_llm: object
@@ -36,11 +39,12 @@ class LLMProviders:
     graph_transformer: LLMGraphTransformer
 
 
-def _build_chat_llm(settings: Settings) -> ChatGoogleGenerativeAI:
-    if settings.google_api_key:
-        os.environ["GOOGLE_API_KEY"] = settings.google_api_key
-    return ChatGoogleGenerativeAI(
-        model=settings.google_chat_model,
+def _build_chat_llm(settings: Settings) -> ChatMistralAI:
+    if settings.mistral_api_key:
+        os.environ["MISTRAL_API_KEY"] = settings.mistral_api_key
+
+    return ChatMistralAI(
+        model=settings.mistral_model,
         temperature=0,
     )
 
@@ -55,19 +59,21 @@ def _build_embeddings(settings: Settings) -> Embeddings:
 
 def _build_transformer(
     settings: Settings,
-    llm: ChatGoogleGenerativeAI,
+    llm: ChatMistralAI,
     additional_instructions: str | None = None,
 ) -> LLMGraphTransformer:
-    kwargs: dict[str, object] = {
-        "llm": llm,
-        "allowed_nodes": list(settings.allowed_node_types),
-        "allowed_relationships": list(settings.allowed_relationship_types),
-        "node_properties": ["description"],
-        "relationship_properties": ["description"],
-    }
+    from app.core.constants import GRAPH_EXTRACTION_INSTRUCTIONS
+
+    instructions = GRAPH_EXTRACTION_INSTRUCTIONS
     if additional_instructions:
-        kwargs["additional_instructions"] = additional_instructions
-    return LLMGraphTransformer(**kwargs)
+        instructions += "\n\n" + additional_instructions
+
+    return LLMGraphTransformer(
+        llm=llm,
+        node_properties=["description"],
+        relationship_properties=["description"],
+        additional_instructions=instructions,
+    )
 
 
 def build_gleaning_instructions(existing_graph_context: str) -> str:
@@ -87,7 +93,7 @@ def build_gleaning_instructions(existing_graph_context: str) -> str:
 
 def build_contextual_gleaning_transformer(
     settings: Settings,
-    llm: ChatGoogleGenerativeAI,
+    llm: ChatMistralAI,
     existing_graph_context: str,
 ) -> LLMGraphTransformer:
     return _build_transformer(

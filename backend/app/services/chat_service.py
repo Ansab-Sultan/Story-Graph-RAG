@@ -103,3 +103,6 @@ class ChatService:
             last_user_message=doc.get("last_user_message"),
             last_answer_preview=doc.get("last_answer_preview"),
         )
+
+    async def delete_story_chats(self, story_id: str) -> None:
+        await self.chats.delete_many({"story_id": story_id})

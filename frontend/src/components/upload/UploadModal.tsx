@@ -1,21 +1,14 @@
 "use client";
-import React, { useState, useRef, useEffect } from "react";
-import { X, UploadCloud, FileText, CheckCircle2, Loader2 } from "lucide-react";
+import React, { useState } from "react";
+import { X, UploadCloud, FileText, Loader2 } from "lucide-react";
 import { useAppContext } from "@/context/AppContext";
 import clsx from "clsx";
 
 export const UploadModal = ({ onClose }: { onClose: () => void }) => {
-  const { refreshStories } = useAppContext();
+  const { startIngestion } = useAppContext();
   const [file, setFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
-  const [progressLog, setProgressLog] = useState<string[]>([]);
-  const [isComplete, setIsComplete] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [progressLog]);
 
   const handleUpload = async () => {
     if (!file) return;
@@ -37,41 +30,12 @@ export const UploadModal = ({ onClose }: { onClose: () => void }) => {
       }
 
       const data = await res.json();
-      const storyId = data.story_id;
-
-      // Start SSE
-      const eventSource = new EventSource(`/api/stories/${storyId}/stream`);
-
-      eventSource.onmessage = (event) => {
-        try {
-          const parsed = JSON.parse(event.data);
-          setProgressLog((prev) => [...prev, `[${parsed.node}] ${parsed.progress}`]);
-        } catch (e) {
-          setProgressLog((prev) => [...prev, event.data]);
-        }
-      };
-
-      eventSource.onerror = (err) => {
-        console.error("SSE Error", err);
-      };
-
-      // Poll completion 
-      const checkCompletion = setInterval(async () => {
-        try {
-          const statRes = await fetch(`/api/stories/${storyId}`);
-          if (statRes.ok) {
-            const statData = await statRes.json();
-            if (statData.status === "complete") {
-              clearInterval(checkCompletion);
-              eventSource.close();
-              setIsComplete(true);
-              setIsUploading(false);
-              refreshStories();
-            }
-          }
-        } catch (e) {}
-      }, 3000);
-
+      
+      // Initiate background ingestion via context
+      startIngestion(data.story_id, file.name);
+      
+      // Close modal immediately
+      onClose();
     } catch (err: any) {
       setError(err.message);
       setIsUploading(false);
@@ -79,87 +43,91 @@ export const UploadModal = ({ onClose }: { onClose: () => void }) => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 text-[var(--foreground)]">
-      <div className="bg-[var(--color-surface)] w-full max-w-lg rounded-xl shadow-2xl overflow-hidden border border-[var(--color-border)] flex flex-col max-h-[90vh]">
-        <div className="flex justify-between items-center p-4 border-b border-[var(--color-border)]">
-          <h2 className="text-xl font-bold tracking-tight">Upload Story</h2>
-          <button onClick={onClose} disabled={isUploading && !isComplete} className="text-gray-500 hover:text-[var(--foreground)]">
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-md p-4 transition-premium">
+      <div className="glass-panel w-full max-w-lg rounded-3xl overflow-hidden flex flex-col max-h-[90vh] shadow-[0_32px_64px_-12px_rgba(0,0,0,0.6)] animate-in fade-in zoom-in duration-300">
+        <div className="flex justify-between items-center p-6 border-b border-[var(--color-border)]">
+          <div>
+            <h2 className="text-xl font-bold tracking-tight">Ingest Narrative</h2>
+            <p className="text-xs text-[var(--color-muted)] mt-1">Upload a PDF or TXT to generate a knowledge graph.</p>
+          </div>
+          <button 
+            onClick={onClose} 
+            disabled={isUploading} 
+            className="text-[var(--color-muted)] hover:text-[var(--foreground)] transition-premium hover:rotate-90 p-2 rounded-full hover:bg-[var(--color-surface-hover)] cursor-pointer disabled:opacity-50"
+          >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        <div className="p-6 flex flex-col gap-6 overflow-y-auto">
-          {!isUploading && !isComplete && (
-            <>
-              {error && <div className="text-red-500 text-sm bg-red-50 dark:bg-red-900/20 p-3 rounded-md border border-red-200">{error}</div>}
-              
-              <div className="border-2 border-dashed border-[var(--color-border)] rounded-xl p-8 flex flex-col items-center text-center gap-4 bg-[var(--background)]">
-                <UploadCloud className="w-12 h-12 text-gray-400" />
-                <div>
-                  <label className="cursor-pointer text-[var(--color-primary)] font-medium hover:underline">
-                    Browse for a file
-                    <input 
-                      type="file" 
-                      accept=".pdf,.txt" 
-                      className="hidden" 
-                      onChange={(e) => e.target.files && setFile(e.target.files[0])}
-                    />
-                  </label>
-                  <p className="text-sm text-gray-500 mt-1">.pdf or .txt formats only.</p>
-                </div>
-                {file && (
-                  <div className="flex items-center gap-2 bg-[var(--color-surface-hover)] px-3 py-2 rounded-md border border-[var(--color-border)] mt-2">
-                    <FileText className="w-4 h-4 text-[var(--color-secondary)]" />
-                    <span className="text-sm font-medium">{file.name}</span>
-                    <button onClick={() => setFile(null)} className="ml-2 text-gray-400 hover:text-[var(--foreground)]"><X className="w-4 h-4"/></button>
-                  </div>
-                )}
-              </div>
-              
-              <button 
-                onClick={handleUpload}
-                disabled={!file}
-                className={clsx(
-                  "py-3 rounded-lg font-medium transition-colors w-full",
-                  file ? "bg-[var(--color-primary)] text-white hover:bg-[var(--color-primary-hover)] shadow-md" : "bg-gray-100 dark:bg-slate-800 text-gray-400 cursor-not-allowed border border-[var(--color-border)]"
-                )}
-              >
-                Upload and Ingest
-              </button>
-            </>
-          )}
-
-          {(isUploading || isComplete) && (
-            <div className="flex flex-col gap-4">
-              <div className="flex items-center gap-3">
-                {isComplete ? (
-                  <CheckCircle2 className="w-6 h-6 text-green-500" />
-                ) : (
-                  <Loader2 className="w-6 h-6 text-[var(--color-primary)] animate-spin" />
-                )}
-                <h3 className="font-semibold">{isComplete ? "Ingestion Complete!" : "Processing Document..."}</h3>
-              </div>
-              
-              <div className="bg-slate-900 dark:bg-black text-green-400 text-xs font-mono p-4 rounded-lg h-64 overflow-y-auto whitespace-pre-wrap leading-relaxed shadow-inner border border-slate-800">
-                {progressLog.map((log, i) => (
-                  <div key={i}>{log}</div>
-                ))}
-                {!isComplete && (
-                  <div className="animate-pulse">_</div>
-                )}
-                <div ref={bottomRef} />
-              </div>
-
-              {isComplete && (
-                <button 
-                  onClick={onClose}
-                  className="mt-2 py-3 bg-[var(--color-primary)] text-white rounded-lg font-medium hover:bg-[var(--color-primary-hover)] w-full shadow-md"
-                >
-                  Return to Library
-                </button>
-              )}
+        <div className="p-8 flex flex-col gap-8">
+          {error && (
+            <div className="text-red-400 text-sm bg-red-400/10 p-4 rounded-2xl border border-red-400/20 flex items-center gap-3">
+              <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse" />
+              {error}
             </div>
           )}
+          
+          <div className="group relative">
+            <div className="absolute -inset-1 bg-gradient-to-r from-[var(--color-primary)] to-[var(--color-secondary)] rounded-2xl blur opacity-10 group-hover:opacity-20 transition-premium" />
+            <div className="relative border-2 border-dashed border-[var(--color-border)] rounded-2xl p-10 flex flex-col items-center text-center gap-4 bg-[var(--color-surface)]/50 group-hover:border-[var(--color-primary)]/50 transition-premium cursor-pointer">
+              <div className="w-16 h-16 rounded-2xl bg-[var(--color-primary)]/10 flex items-center justify-center text-[var(--color-primary)] mb-2">
+                <UploadCloud className="w-8 h-8" />
+              </div>
+              <div className="space-y-1">
+                <p className="font-semibold text-lg">Drop your story here</p>
+                <p className="text-sm text-[var(--color-muted)]">Support for high-density PDF or TXT files</p>
+              </div>
+              <label className="cursor-pointer">
+                <span className="text-white bg-[var(--color-primary)] px-5 py-2.5 rounded-xl font-bold hover:bg-[var(--color-primary-hover)] transition-premium shadow-lg shadow-[var(--color-primary)]/20 block mt-2 hover:-translate-y-0.5 active:scale-[0.98]">
+                  Select File
+                </span>
+                <input 
+                  type="file" 
+                  accept=".pdf,.txt" 
+                  className="hidden" 
+                  onChange={(e) => e.target.files && setFile(e.target.files[0])}
+                />
+              </label>
+            </div>
+          </div>
+
+          {file && (
+            <div className="flex items-center gap-4 bg-[var(--color-surface)] p-4 rounded-2xl border border-[var(--color-border)] shadow-sm animate-in slide-in-from-bottom-4 duration-300">
+              <div className="w-10 h-10 rounded-xl bg-[var(--color-secondary)]/10 flex items-center justify-center text-[var(--color-secondary)]">
+                <FileText className="w-5 h-5" />
+              </div>
+              <div className="flex-1 overflow-hidden">
+                <p className="text-sm font-semibold truncate">{file.name}</p>
+                <p className="text-[10px] text-[var(--color-muted)]">{(file.size / 1024).toFixed(1)} KB</p>
+              </div>
+              <button 
+                onClick={() => setFile(null)} 
+                className="text-[var(--color-muted)] hover:text-[var(--color-error)] transition-premium p-1.5 rounded-lg hover:bg-[var(--color-error)]/10 cursor-pointer"
+              >
+                <X className="w-4 h-4"/>
+              </button>
+            </div>
+          )}
+          
+          <button 
+            onClick={handleUpload}
+            disabled={!file || isUploading}
+            className={clsx(
+              "py-4 rounded-2xl font-bold transition-premium w-full flex items-center justify-center gap-3 text-lg shadow-xl",
+              file && !isUploading 
+                ? "bg-[var(--color-primary)] text-white hover:bg-[var(--color-primary-hover)] hover:scale-[1.02] active:scale-[0.98] cursor-pointer shadow-[var(--color-primary)]/10" 
+                : "bg-[var(--surface-secondary)] text-[var(--color-muted)] cursor-not-allowed border border-[var(--color-border)] shadow-none"
+            )}
+          >
+            {isUploading ? (
+              <>
+                <Loader2 className="w-6 h-6 animate-spin" />
+                <span>Processing Stream...</span>
+              </>
+            ) : (
+              <span>Start Ingestion</span>
+            )}
+          </button>
         </div>
       </div>
     </div>

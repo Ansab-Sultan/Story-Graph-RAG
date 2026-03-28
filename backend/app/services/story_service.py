@@ -113,3 +113,6 @@ class StoryService:
             relationship_count=doc.get("relationship_count"),
             chunk_count=doc.get("chunk_count"),
         )
+
+    async def delete_story(self, story_id: str) -> None:
+        await self.stories.delete_one({"_id": story_id})

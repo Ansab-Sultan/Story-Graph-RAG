@@ -113,11 +113,13 @@ class QueryWorkflow:
         }
 
     async def cypher_generator(self, state: QueryState) -> dict[str, Any]:
+        schema = await self.services.graph_service.get_story_schema(state["story_id"])
         result: CypherOutput = await self.services.llm_providers.cypher_llm.ainvoke(
             build_cypher_prompt(
                 story_id=state["story_id"],
                 messages=state["messages"],
-                allowed_relationships=self.services.settings.allowed_relationship_types,
+                node_types=schema["node_types"],
+                relationship_types=schema["relationship_types"],
                 history_limit=self.services.settings.chat_prompt_history_messages,
             )
         )

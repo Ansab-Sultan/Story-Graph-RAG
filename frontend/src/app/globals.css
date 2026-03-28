@@ -1,55 +1,204 @@
 @import "tailwindcss";
 
 @theme {
-  --color-primary: #2563EB;
-  --color-primary-hover: #1D4ED8;
-  --color-secondary: #3B82F6;
-  --color-cta: #F97316;
-  --color-cta-hover: #EA580C;
+  --color-primary: #0070F3;
+  --color-primary-hover: #0061D5;
+  --color-secondary: #4F46E5;
+  --color-accent: #F59E0B;
+  --color-success: #10B981;
+  --color-error: #EF4444;
   
-  /* Light mode defaults */
+  /* Neutral Palette - Optimized for Light Mode (Premium Professional) */
   --color-background: #F8FAFC;
   --color-foreground: #0F172A;
   --color-surface: #FFFFFF;
   --color-surface-hover: #F1F5F9;
   --color-border: #E2E8F0;
+  --color-muted: #64748B;
   
-  --font-sans: var(--font-geist-sans), Inter, sans-serif;
-  --font-mono: var(--font-geist-mono), monospace;
-}
-
-@media (prefers-color-scheme: dark) {
-  @theme {
-    --color-background: #020617;
-    --color-foreground: #F8FAFC;
-    --color-surface: #0F172A;
-    --color-surface-hover: #1E293B;
-    --color-border: #1E293B;
-  }
+  --font-sans: var(--font-geist-sans), Inter, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
 }
 
 :root {
-  --background: var(--color-background);
-  --foreground: var(--color-foreground);
+  /* Semantic Tokens - Light Mode (Clean Tech) */
+  --bg-primary: #F8FAFC;
+  --bg-secondary: #FFFFFF;
+  --text-primary: #0F172A;
+  --text-secondary: #475569;
+  --border-primary: rgba(15, 23, 42, 0.08);
+  --surface-primary: rgba(255, 255, 255, 0.95);
+  --surface-secondary: rgba(15, 23, 42, 0.03);
+  --surface-hover: rgba(15, 23, 42, 0.06);
+  --accent-primary: #0070F3;
+  --accent-secondary: #4F46E5;
+  --accent-glow: rgba(0, 112, 243, 0.15);
+  
+  --color-success: #10B981;
+  --color-error: #EF4444;
+  --color-warning: #F59E0B;
+  
+  --glass-blur: blur(20px);
+  --transition-speed: 350ms;
+  --radius-xl: 1.25rem;
+  --radius-2xl: 1.75rem;
+
+  /* Legacy Compatibility for current code */
+  --background: var(--bg-primary);
+  --foreground: var(--text-primary);
+  --color-primary: var(--accent-primary);
+  --color-secondary: var(--accent-secondary);
+  --color-surface: var(--surface-primary);
+  --color-surface-hover: var(--surface-hover);
+  --color-muted: var(--text-secondary);
+  --color-border: var(--border-primary);
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: var(--font-sans);
-  -webkit-font-smoothing: antialiased;
+@layer base {
+  body {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    background-image: 
+      radial-gradient(circle at 0% 0%, var(--accent-glow) 0%, transparent 40%),
+      radial-gradient(circle at 100% 100%, var(--accent-glow) 0%, transparent 40%);
+    background-attachment: fixed;
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+    transition: background-color var(--transition-speed) ease, color var(--transition-speed) ease;
+  }
 }
 
-/* Custom utilities for glass and transitions */
 @layer utilities {
   .glass-panel {
-    background-color: color-mix(in srgb, var(--color-surface) 80%, transparent);
-    backdrop-filter: blur(8px);
+    background: var(--color-surface);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--color-border);
+    box-shadow: 0 10px 40px -10px rgba(0, 0, 0, 0.15);
+  }
+
+  .glass-panel {
+    background: var(--color-surface);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--color-border);
+    box-shadow: 0 10px 40px -10px rgba(0, 0, 0, 0.05);
+  }
+
+  .glass-pill {
+    background: var(--surface-secondary);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
     border: 1px solid var(--color-border);
   }
-  .transition-brand {
-    transition-property: all;
-    transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
-    transition-duration: 200ms;
+
+  .transition-premium {
+    transition: all var(--transition-speed) cubic-bezier(0.16, 1, 0.3, 1);
   }
+
+  .shimmer {
+    background-image: linear-gradient(
+      90deg,
+      transparent,
+      rgba(255, 255, 255, 0.25),
+      transparent
+    );
+    background-size: 200% 100%;
+    animation: shimmer 2s infinite linear;
+  }
+
+  .accent-glow {
+    box-shadow: 0 0 30px -5px var(--accent-glow);
+  }
+
+  .neural-grid {
+    position: relative;
+    background-size: 40px 40px;
+    background-image: 
+      linear-gradient(to right, var(--border-primary) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--border-primary) 1px, transparent 1px);
+  }
+
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: 10px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: var(--color-primary);
+  }
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@keyframes stagger-fade-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.stagger-fade-in {
+  animation: stagger-fade-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  opacity: 0;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.5; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.05); }
+}
+
+@keyframes orbit {
+  from { transform: rotate(0deg) translateX(40px) rotate(0deg); }
+  to { transform: rotate(360deg) translateX(40px) rotate(-360deg); }
+}
+
+@keyframes neural-pulse {
+  0% { transform: scale(0.95); opacity: 0; }
+  50% { opacity: 0.2; }
+  100% { transform: scale(1.5); opacity: 0; }
+}
+
+@keyframes light-sweep {
+  0% { left: -100%; top: -100%; }
+  50% { left: 100%; top: 100%; }
+  100% { left: 100%; top: 100%; }
+}
+
+@keyframes iridescent {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+@keyframes corner-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+.animate-light-sweep {
+  animation: light-sweep 4s ease-in-out infinite;
+}
+
+.animate-iridescent {
+  background-size: 200% 200%;
+  animation: iridescent 8s ease infinite;
+}
+
+.animate-corner-pulse {
+  animation: corner-pulse 2s ease-in-out infinite;
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 2s ease-in-out infinite;
 }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+import re
 from typing import Any
 
 from neo4j import AsyncDriver
@@ -88,7 +89,7 @@ class GraphService:
             node_result = await session.run(
                 f"""
                 MATCH (n:{GRAPH_ENTITY_LABEL} {{story_id: $story_id}})
-                RETURN n.name AS id, n.name AS label, n.type AS type, n.description AS description
+                RETURN n.name AS id, n.name AS label, n.type AS type, coalesce(n.description, '') AS description
                 ORDER BY n.name
                 """,
                 story_id=story_id,
@@ -96,7 +97,7 @@ class GraphService:
             relationship_result = await session.run(
                 f"""
                 MATCH (source:{GRAPH_ENTITY_LABEL} {{story_id: $story_id}})-[r]->(target:{GRAPH_ENTITY_LABEL} {{story_id: $story_id}})
-                RETURN source.name AS source, target.name AS target, type(r) AS relationship_type, r.description AS description
+                RETURN source.name AS source, target.name AS target, type(r) AS relationship_type, coalesce(r.description, '') AS description
                 """,
                 story_id=story_id,
             )
@@ -119,6 +120,13 @@ class GraphService:
                 async for record in relationship_result
             ]
         return GraphResponse(story_id=story_id, nodes=nodes, edges=edges)
+
+    async def delete_story_graph(self, story_id: str) -> None:
+        async with self.driver.session() as session:
+            await session.run(
+                f"MATCH (n:{GRAPH_ENTITY_LABEL} {{story_id: $story_id}}) DETACH DELETE n",
+                story_id=story_id,
+            )
 
     async def execute_cypher(self, story_id: str, cypher: str) -> list[dict[str, Any]]:
         if "$story_id" not in cypher and story_id not in cypher:
@@ -192,12 +200,29 @@ class GraphService:
             raw_results=graph_results,
         )
 
-    def _sanitize_relationship_type(self, relationship_type: str) -> str:
-        if relationship_type not in self.settings.allowed_relationship_types:
-            raise InfrastructureError(
-                f"Unsupported relationship type '{relationship_type}' encountered during graph persistence."
+    @staticmethod
+    def _sanitize_relationship_type(relationship_type: str) -> str:
+        sanitized = relationship_type.upper().strip()
+        sanitized = re.sub(r"[^A-Z0-9]", "_", sanitized)
+        sanitized = re.sub(r"_+", "_", sanitized).strip("_")
+        return sanitized or "RELATED_TO"
+
+    async def get_story_schema(self, story_id: str) -> dict[str, list[str]]:
+        async with self.driver.session() as session:
+            node_result = await session.run(
+                f"MATCH (n:{GRAPH_ENTITY_LABEL} {{story_id: $story_id}}) "
+                "RETURN DISTINCT n.type AS type",
+                story_id=story_id,
             )
-        return relationship_type
+            rel_result = await session.run(
+                f"MATCH (:{GRAPH_ENTITY_LABEL} {{story_id: $story_id}})"
+                f"-[r]->(:{GRAPH_ENTITY_LABEL} {{story_id: $story_id}}) "
+                "RETURN DISTINCT type(r) AS type",
+                story_id=story_id,
+            )
+            node_types = [r["type"] async for r in node_result if r["type"]]
+            rel_types = [r["type"] async for r in rel_result if r["type"]]
+        return {"node_types": sorted(node_types), "relationship_types": sorted(rel_types)}
 
     def _serialize_mapping(self, value: Mapping[str, Any]) -> dict[str, Any]:
         return {key: self._serialize_value(item) for key, item in value.items()}

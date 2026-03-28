@@ -64,12 +64,23 @@ class JobStateService:
         node: str,
         progress: str,
         status: str | None = None,
+        stage: str | None = None,
+        step: int | None = None,
+        total_steps: int | None = None,
+        progress_percent: int | None = None,
     ) -> None:
-        payload = ProgressEvent(node=node, progress=progress, status=status).model_dump()
+        payload = ProgressEvent(
+            node=node,
+            progress=progress,
+            status=status,
+            stage=stage,
+            step=step,
+            total_steps=total_steps,
+            progress_percent=progress_percent,
+        ).model_dump()
         await self.redis.rpush(self._stream_key(story_id), json.dumps(payload))
 
     async def read_progress_since(self, story_id: str, index: int) -> tuple[list[ProgressEvent], int]:
         values = await self.redis.lrange(self._stream_key(story_id), index, -1)
         events = [ProgressEvent.model_validate_json(value) for value in values]
         return events, index + len(events)
-

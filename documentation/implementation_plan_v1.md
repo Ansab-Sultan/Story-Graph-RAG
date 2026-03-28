@@ -22,20 +22,20 @@ The build is split into 6 sequential phases. Each phase must work end-to-end bef
 | # | Task | Notes |
 |---|---|---|
 | 1.1 | Set up Python environment | Python 3.12+, install `langgraph`, `langchain-google-genai`, `langchain-experimental`, `langchain-community`, `sentence-transformers`, `neo4j`, `qdrant-client`, `pypdf`, and `pydantic-settings` |
-| 1.2 | Define `IngestionState` TypedDict | Fields: `story_id`, `title`, `raw_text`, `chunks`, `graph_docs`, `alias_map`, `graph_built`, `vectors_stored`, `progress` |
-| 1.3 | Implement `loader.py` | Extract raw text from `.pdf` (pypdf) and `.txt`; use `RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=100)`; wrap each chunk as a LangChain `Document` with `story_id`, `chunk_id`, `chunk_index` metadata — no LLM involved |
-| 1.4 | Implement `graph_extractor.py` | Initialize `LLMGraphTransformer` with `allowed_nodes`, `allowed_relationships`, `node_properties=["description"]`, `relationship_properties=["description"]`; call `await transformer.aconvert_to_graph_documents(state["chunks"])` — single async batched call that returns both nodes and relationships together |
-| 1.5 | Implement `gleaning.py` | Build a contextual second-pass `LLMGraphTransformer` per chunk, include the already extracted nodes/relationships from that exact chunk in the prompt, ask for only genuinely new entities/relationships, and merge with code-level node/edge deduplication |
+| 1.2 | Define `IngestionState` TypedDict | Fields: `story_id`, `title`, `raw_text`, `graph_chunks`, `vector_chunks`, `graph_docs`, `alias_map`, `graph_built`, `vectors_stored`, `progress` |
+| 1.3 | Implement `loader.py` | Extract raw text from `.pdf` (pypdf) and `.txt`; build two chunk streams from the same raw text using `RecursiveCharacterTextSplitter`: graph chunks (`GRAPH_CHUNK_SIZE=9000`, `GRAPH_CHUNK_OVERLAP=1000`) and vector chunks (`VECTOR_CHUNK_SIZE=600`, `VECTOR_CHUNK_OVERLAP=100`); wrap each chunk as a LangChain `Document` with `story_id`, `chunk_id`, `chunk_index`, and `chunk_kind` metadata — no LLM involved |
+| 1.4 | Implement `graph_extractor.py` | Initialize `LLMGraphTransformer` with `allowed_nodes`, `allowed_relationships`, `node_properties=["description"]`, `relationship_properties=["description"]`; call `await transformer.aconvert_to_graph_documents(state["graph_chunks"])` so the extractor sees the larger context windows |
+| 1.5 | Implement `gleaning.py` | Build a contextual second-pass `LLMGraphTransformer` per graph chunk, include the already extracted nodes/relationships from that exact graph chunk in the prompt, ask for only genuinely new entities/relationships, and merge with code-level node/edge deduplication |
 | 1.6 | Implement `deduplication.py` | Collect all unique node names from `graph_docs`; make single LLM call using `llm.with_structured_output(DeduplicationOutput)` to group aliases; build `alias_map`; apply map to every `node.id`, `rel.source.id`, `rel.target.id` in `graph_docs`; then run a second code-level graph dedup pass so alias collapse cannot create duplicate edges |
 | 1.7 | Implement `graph_builder.py` | Connect to Neo4j async driver; `MERGE` nodes and relationships using canonical names from deduplicated `graph_docs`; scope all writes to `story_id`; create indexes on `name` and `type`; **no embeddings** — Neo4j stores graph structure only |
-| 1.8 | Implement `vector_embedder.py` | Batch embed `chunk.page_content` for all chunks using `BAAI/bge-small-en-v1.5`; infer vector size dynamically before creating Qdrant collection `story_{story_id}`; upsert all points — **this is the only place document embeddings are created in the ingestion pipeline** |
+| 1.8 | Implement `vector_embedder.py` | Batch embed `chunk.page_content` for all `vector_chunks` using `BAAI/bge-small-en-v1.5`; infer vector size dynamically before creating Qdrant collection `story_{story_id}`; upsert all points — **this is the only place document embeddings are created in the ingestion pipeline** |
 | 1.9 | Wire ingestion graph in `ingestion/graph.py` | Nodes: `loader → graph_extractor → gleaning → deduplication → graph_builder` and `deduplication → vector_embedder`; graph_builder and vector_embedder run in parallel after deduplication |
 | 1.10 | Test with a short story (~20 pages) | Run the ingestion graph directly; verify Neo4j browser at `localhost:7474` shows populated graph with correct node types and relationships; verify Qdrant collection has correct chunk count |
 | 1.11 | Validate extraction and deduplication quality | Check that "Holmes", "Sherlock", "Mr. Holmes" collapse into one node; check relationship types are from the allowed list; verify contextual gleaning only adds genuinely new items and does not duplicate relationships |
 
 ### Exit Criteria
 - Running the ingestion graph on a short story produces a populated graph in the Neo4j browser
-- Qdrant collection for the story has the correct number of chunks
+- Qdrant collection for the story has the correct number of vector chunks
 - Alias deduplication works — same character does not appear as multiple separate nodes
 - Relationships are directional, typed correctly, and scoped to `story_id`
 - Neo4j write uses zero embedding calls — all vector creation is isolated to the Qdrant embedding step
@@ -191,7 +191,7 @@ The build is split into 6 sequential phases. Each phase must work end-to-end bef
 | Cypher generator produces invalid or unscoped queries | Medium | High | Include full schema in every Cypher prompt; wrap Neo4j execution in try/except; fall back to vector search if Cypher fails |
 | Router misclassifies question type | Medium | Medium | Test router with 20+ diverse questions in Phase 2; add few-shot examples to the router prompt if accuracy is low |
 | Neo4j Cypher scoping bug leaks data across stories | Low | High | Every Cypher query must filter by `story_id` — enforce in the Cypher generator prompt and add a validation step before execution |
-| Large novels (300+ pages) make gleaning + deduplication slow | Medium | Medium | Cap gleaning to one pass only; batch deduplication name list to avoid hitting context limits |
+| Large graph chunks increase extraction and gleaning latency on long novels | Medium | Medium | Keep vector chunks small for retrieval, keep gleaning to one pass only, and tune graph chunk size / overlap if the selected LLM or hardware becomes the bottleneck |
 | Sigma ForceAtlas2 layout becomes noisy on dense graphs | Medium | Low | Tune layout iterations and node sizing; provide filters or type toggles for large story graphs; retain Graphology data so the layout and render layer stay decoupled |
 | Gemini API costs or quotas spike during ingestion of large files | Medium | Low | Keep Gemini model on the lightweight Flash-Lite tier; estimate cost per page before ingestion; embeddings remain local via BAAI |
 | Local BGE embedding runtime is heavy on some machines | Medium | Medium | Default to CPU, document memory expectations, and make embedding device configurable via env |

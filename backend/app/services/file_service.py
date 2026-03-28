@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,10 +43,39 @@ class FileService:
             return file_path.read_text(encoding="utf-8")
         return self._extract_pdf_text(file_path)
 
-    def build_chunks(self, story_id: str, raw_text: str) -> list[Document]:
+    def build_graph_chunks(self, story_id: str, raw_text: str) -> list[Document]:
+        return self._build_chunks(
+            story_id,
+            raw_text,
+            chunk_size=self.settings.graph_chunk_size,
+            chunk_overlap=self.settings.graph_chunk_overlap,
+            chunk_id_prefix=f"{story_id}_graph_chunk_",
+            chunk_kind="graph",
+        )
+
+    def build_vector_chunks(self, story_id: str, raw_text: str) -> list[Document]:
+        return self._build_chunks(
+            story_id,
+            raw_text,
+            chunk_size=self.settings.vector_chunk_size,
+            chunk_overlap=self.settings.vector_chunk_overlap,
+            chunk_id_prefix=f"{story_id}_chunk_",
+            chunk_kind="vector",
+        )
+
+    def _build_chunks(
+        self,
+        story_id: str,
+        raw_text: str,
+        *,
+        chunk_size: int,
+        chunk_overlap: int,
+        chunk_id_prefix: str,
+        chunk_kind: str,
+    ) -> list[Document]:
         splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.settings.chunk_size,
-            chunk_overlap=self.settings.chunk_overlap,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
         )
         raw_chunks = splitter.split_text(raw_text)
         return [
@@ -53,8 +83,12 @@ class FileService:
                 page_content=chunk,
                 metadata={
                     "story_id": story_id,
-                    "chunk_id": f"{story_id}_chunk_{index}",
+                    "chunk_id": str(
+                        uuid.uuid5(uuid.NAMESPACE_URL, f"{chunk_id_prefix}{index}")
+                    ),
+                    "chunk_label": f"{chunk_id_prefix}{index}",
                     "chunk_index": index,
+                    "chunk_kind": chunk_kind,
                 },
             )
             for index, chunk in enumerate(raw_chunks)
@@ -69,4 +103,3 @@ class FileService:
         reader = PdfReader(str(file_path))
         pages = [page.extract_text() or "" for page in reader.pages]
         return "\n".join(pages).strip()
-

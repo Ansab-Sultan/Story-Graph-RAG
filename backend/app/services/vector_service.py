@@ -131,3 +131,9 @@ class VectorService:
             probe_embedding = await self.embeddings.aembed_query("vector size probe")
             self.vector_size = len(probe_embedding)
         return self.vector_size
+
+    async def delete_story_vectors(self, story_id: str) -> None:
+        collection_name = self.story_collection_name(story_id)
+        exists = await self.client.collection_exists(collection_name=collection_name)
+        if exists:
+            await self.client.delete_collection(collection_name=collection_name)
